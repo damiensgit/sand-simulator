@@ -15,6 +15,7 @@ let selectedMaterial = SAND;
 let isPaused = false;
 let sandColor = [0.92, 0.79, 0.41]; // Default sand color (RGB 0-1)
 let colorByAge = false;
+let fluidity = 50; // 0 = sticky, 100 = very fluid
 
 async function init() {
     if (!navigator.gpu) {
@@ -101,14 +102,16 @@ async function init() {
         code: `
             @group(0) @binding(0) var inputTex: texture_storage_2d<r32uint, read>;
             @group(0) @binding(1) var outputTex: texture_storage_2d<r32uint, write>;
-            @group(0) @binding(2) var<uniform> params: vec4u; // frame, width, height, unused
+            @group(0) @binding(2) var<uniform> params: vec4u; // frame, width, height, fluidity (0-100)
             @group(0) @binding(3) var spawnTex: texture_storage_2d<r32uint, read>; // spawn requests
 
             const EMPTY: u32 = 0u;
             const SAND: u32 = 1u;
             const WALL: u32 = 2u;
             const TYPE_MASK: u32 = 0xFFu;
+            const AGE_MASK: u32 = 0xFFFFu;
             const AGE_SHIFT: u32 = 8u;
+            const COLOR_SHIFT: u32 = 24u;
             const MAX_AGE: u32 = 65535u;
 
             // Simple hash for randomness
@@ -123,11 +126,15 @@ async function init() {
             }
 
             fn getAge(value: u32) -> u32 {
-                return value >> AGE_SHIFT;
+                return (value >> AGE_SHIFT) & AGE_MASK;
             }
 
-            fn packCell(cellType: u32, age: u32) -> u32 {
-                return cellType | (min(age, MAX_AGE) << AGE_SHIFT);
+            fn getColorVar(value: u32) -> u32 {
+                return value >> COLOR_SHIFT;
+            }
+
+            fn packCell(cellType: u32, age: u32, colorVar: u32) -> u32 {
+                return cellType | (min(age, MAX_AGE) << AGE_SHIFT) | (colorVar << COLOR_SHIFT);
             }
 
             fn getRawCell(pos: vec2i) -> u32 {
@@ -182,18 +189,22 @@ async function init() {
 
                 // SETTLING: Sand slides sideways to find lower ground
                 // But settling urge decreases with age - old sand stays put
+                // Fluidity affects how eager sand is to settle (0=sticky, 100=fluid)
                 let currentAge = getAge(getRawCell(pos));
                 let settleRoll = rng % 100u;
+                let fluidityFactor = f32(params.w) / 50.0; // 0-2 range, 1.0 at fluidity=50
 
-                // Settling probability drops off with age:
-                // Age 0-10: 80% settle chance (fresh, active)
-                // Age 10-30: 40% settle chance (slowing down)
-                // Age 30-60: 15% settle chance (mostly settled)
-                // Age 60+: 3% settle chance (rare adjustments)
-                var maxSettleChance = 80u;
-                if (currentAge > 10u) { maxSettleChance = 40u; }
-                if (currentAge > 30u) { maxSettleChance = 15u; }
-                if (currentAge > 60u) { maxSettleChance = 3u; }
+                // Base settle chances, scaled by fluidity
+                // Age 0-10: base 60% settle chance (fresh, active)
+                // Age 10-30: base 30% settle chance (slowing down)
+                // Age 30-60: base 12% settle chance (mostly settled)
+                // Age 60+: base 2% settle chance (rare adjustments)
+                var baseChance = 60.0;
+                if (currentAge > 10u) { baseChance = 30.0; }
+                if (currentAge > 30u) { baseChance = 12.0; }
+                if (currentAge > 60u) { baseChance = 2.0; }
+
+                let maxSettleChance = u32(min(baseChance * fluidityFactor, 95.0));
 
                 // Only consider settling if we pass the age-based probability check
                 if (settleRoll >= maxSettleChance) {
@@ -255,42 +266,42 @@ async function init() {
                 let rawCell = getRawCell(pos);
                 var current = getType(rawCell);
                 var currentAge = getAge(rawCell);
-
-                // Check for spawn requests - only apply to EMPTY cells (or eraser always works)
-                var wasJustSpawned = false;
-                let spawnRequest = textureLoad(spawnTex, pos).r;
-                if (spawnRequest == 255u) {
-                    // Eraser - always clear
-                    current = EMPTY;
-                    currentAge = 0u;
-                } else if (spawnRequest > 0u && current == EMPTY) {
-                    // Spawn sand/wall only in empty cells
-                    current = spawnRequest;
-                    currentAge = 0u;
-                    wasJustSpawned = true;
-                }
+                var currentColorVar = getColorVar(rawCell);
 
                 // Generate randomness for this cell
                 let rng = hash(vec2u(id.xy), frame);
 
+                // Read spawn request (handle later after checking incoming sand)
+                let spawnRequest = textureLoad(spawnTex, pos).r;
+
                 var resultType = current;
                 var resultAge = currentAge;
+                var resultColorVar = currentColorVar;
 
                 if (current == WALL) {
-                    resultType = WALL;
-                    resultAge = 0u;
+                    // Check for eraser
+                    if (spawnRequest == 255u) {
+                        resultType = EMPTY;
+                        resultAge = 0u;
+                        resultColorVar = 0u;
+                    } else {
+                        resultType = WALL;
+                        resultAge = 0u;
+                        resultColorVar = 0u;
+                    }
                 }
                 else if (current == SAND) {
-                    // Freshly spawned sand doesn't move this frame
-                    // (neighbors don't know about it yet since they read from inputTex)
-                    if (wasJustSpawned) {
-                        resultType = SAND;
+                    // Check for eraser
+                    if (spawnRequest == 255u) {
+                        resultType = EMPTY;
                         resultAge = 0u;
+                        resultColorVar = 0u;
                     } else {
                         let movement = getSandMovement(pos, rng);
                         if (movement.x != 0 || movement.y != 0) {
                             resultType = EMPTY;
                             resultAge = 0u;
+                            resultColorVar = 0u;
                         } else {
                             resultType = SAND;
                             resultAge = currentAge + 1u; // Age increases when stationary
@@ -298,8 +309,8 @@ async function init() {
                     }
                 }
                 else if (current == EMPTY) {
-                    // Check for incoming sand from various directions
-                    var incomingAge = 0u;
+                    // First check for incoming sand from various directions
+                    var incomingRaw = 0u;
 
                     // From directly above
                     let above = pos + vec2i(0, -1);
@@ -309,7 +320,7 @@ async function init() {
                         let movement = getSandMovement(above, aboveRng);
                         if (above.x + movement.x == pos.x && above.y + movement.y == pos.y) {
                             resultType = SAND;
-                            incomingAge = getAge(aboveRaw);
+                            incomingRaw = aboveRaw;
                         }
                     }
 
@@ -322,7 +333,7 @@ async function init() {
                             let movement = getSandMovement(aboveLeft, alRng);
                             if (aboveLeft.x + movement.x == pos.x && aboveLeft.y + movement.y == pos.y) {
                                 resultType = SAND;
-                                incomingAge = getAge(aboveLeftRaw);
+                                incomingRaw = aboveLeftRaw;
                             }
                         }
                     }
@@ -336,7 +347,7 @@ async function init() {
                             let movement = getSandMovement(aboveRight, arRng);
                             if (aboveRight.x + movement.x == pos.x && aboveRight.y + movement.y == pos.y) {
                                 resultType = SAND;
-                                incomingAge = getAge(aboveRightRaw);
+                                incomingRaw = aboveRightRaw;
                             }
                         }
                     }
@@ -350,7 +361,7 @@ async function init() {
                             let movement = getSandMovement(left, lRng);
                             if (left.x + movement.x == pos.x && left.y + movement.y == pos.y) {
                                 resultType = SAND;
-                                incomingAge = getAge(leftRaw);
+                                incomingRaw = leftRaw;
                             }
                         }
                     }
@@ -364,18 +375,26 @@ async function init() {
                             let movement = getSandMovement(right, rRng);
                             if (right.x + movement.x == pos.x && right.y + movement.y == pos.y) {
                                 resultType = SAND;
-                                incomingAge = getAge(rightRaw);
+                                incomingRaw = rightRaw;
                             }
                         }
                     }
 
-                    // Moving sand resets age to 0 (it's "fresh")
+                    // Handle result
                     if (resultType == SAND) {
+                        // Incoming sand - preserve its color variation
                         resultAge = 0u;
+                        resultColorVar = getColorVar(incomingRaw);
+                    } else if (spawnRequest > 0u && spawnRequest != 255u) {
+                        // No incoming sand, so we can spawn here
+                        resultType = spawnRequest;
+                        resultAge = 0u;
+                        resultColorVar = rng % 256u;
                     }
+                    // else: stays EMPTY
                 }
 
-                textureStore(outputTex, pos, vec4u(packCell(resultType, resultAge), 0u, 0u, 0u));
+                textureStore(outputTex, pos, vec4u(packCell(resultType, resultAge, resultColorVar), 0u, 0u, 0u));
             }
         `
     });
@@ -388,7 +407,9 @@ async function init() {
             @group(0) @binding(1) var<uniform> colorParams: vec4f; // r, g, b, colorByAge
 
             const TYPE_MASK: u32 = 0xFFu;
+            const AGE_MASK: u32 = 0xFFFFu;
             const AGE_SHIFT: u32 = 8u;
+            const COLOR_SHIFT: u32 = 24u;
 
             struct VertexOutput {
                 @builtin(position) pos: vec4f,
@@ -435,27 +456,30 @@ async function init() {
                 let rawCell = textureLoad(inputTex, texCoord, 0).r;
 
                 let cellType = rawCell & TYPE_MASK;
-                let age = rawCell >> AGE_SHIFT;
+                let age = (rawCell >> AGE_SHIFT) & AGE_MASK;
+                let colorVar = rawCell >> COLOR_SHIFT; // 0-255 per-particle variation
 
                 if (cellType == 1u) {
                     // Sand
                     let baseColor = vec3f(colorParams.r, colorParams.g, colorParams.b);
+
+                    // Subtle per-particle brightness variation: ±5%
+                    let varNorm = f32(colorVar) / 255.0; // 0-1
+                    let brightMult = 0.95 + varNorm * 0.10; // 0.95 to 1.05
 
                     if (colorParams.a > 0.5) {
                         // Color by age mode
                         let normalizedAge = min(f32(age) / 500.0, 1.0);
 
                         // Young sand: bright/saturated, Old sand: darker/more muted
-                        // Use a nice gradient from yellow-orange (new) to brown-red (old)
-                        let hue = 0.08 - normalizedAge * 0.06; // Orange to red-brown
+                        let hue = 0.08 - normalizedAge * 0.06;
                         let sat = 0.9 - normalizedAge * 0.3;
-                        let val = 1.0 - normalizedAge * 0.5;
+                        let val = (1.0 - normalizedAge * 0.5) * brightMult;
 
-                        return vec4f(hsv2rgb(hue, sat, val), 1.0);
+                        return vec4f(hsv2rgb(hue, sat, clamp(val, 0.2, 1.0)), 1.0);
                     } else {
-                        // Standard color with slight variation based on age for texture
-                        let ageVar = f32(age % 20u) / 100.0;
-                        return vec4f(baseColor * (1.0 - ageVar * 0.1), 1.0);
+                        // Standard color with subtle per-particle brightness variation
+                        return vec4f(clamp(baseColor * brightMult, vec3f(0.0), vec3f(1.0)), 1.0);
                     }
                 } else if (cellType == 2u) {
                     // Wall
@@ -547,6 +571,14 @@ async function init() {
     const materialBtns = document.querySelectorAll('.material-btn');
     const colorPicker = document.getElementById('sandColor');
     const colorByAgeCheckbox = document.getElementById('colorByAge');
+    const fluiditySlider = document.getElementById('fluidity');
+    const fluidityValueDisplay = document.getElementById('fluidityValue');
+
+    // Fluidity control
+    fluiditySlider.addEventListener('input', (e) => {
+        fluidity = parseInt(e.target.value);
+        fluidityValueDisplay.textContent = fluidity;
+    });
 
     // Color picker
     colorPicker.addEventListener('input', (e) => {
@@ -631,6 +663,18 @@ async function init() {
             case 'A':
                 colorByAgeCheckbox.checked = !colorByAgeCheckbox.checked;
                 colorByAge = colorByAgeCheckbox.checked;
+                break;
+            case '-':
+            case '_':
+                fluidity = Math.max(0, fluidity - 10);
+                fluiditySlider.value = fluidity;
+                fluidityValueDisplay.textContent = fluidity;
+                break;
+            case '=':
+            case '+':
+                fluidity = Math.min(100, fluidity + 10);
+                fluiditySlider.value = fluidity;
+                fluidityValueDisplay.textContent = fluidity;
                 break;
         }
     });
@@ -752,7 +796,7 @@ async function init() {
         if (!isPaused) {
             for (let step = 0; step < simSpeed; step++) {
                 const currentReadIndex = (frame + step) % 2;
-                device.queue.writeBuffer(paramsBuffer, 0, new Uint32Array([frame + step, WIDTH, HEIGHT, 0]));
+                device.queue.writeBuffer(paramsBuffer, 0, new Uint32Array([frame + step, WIDTH, HEIGHT, fluidity]));
 
                 const computePass = encoder.beginComputePass();
                 computePass.setPipeline(computePipeline);

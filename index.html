@@ -263,6 +263,11 @@
         </div>
 
         <div class="control-group">
+            <label>Fluidity: <span class="value" id="fluidityValue">50</span></label>
+            <input type="range" id="fluidity" min="0" max="100" value="50">
+        </div>
+
+        <div class="control-group">
             <label>Actions</label>
             <div class="action-buttons">
                 <button class="action-btn pause" id="pauseBtn">Pause</button>
@@ -277,7 +282,7 @@
     </div>
 
     <div class="keyboard-hints">
-        <kbd>1</kbd> Sand <kbd>2</kbd> Wall <kbd>3</kbd> Eraser <kbd>Space</kbd> Pause <kbd>C</kbd> Clear <kbd>[ ]</kbd> Brush size <kbd>A</kbd> Toggle age color
+        <kbd>1</kbd> Sand <kbd>2</kbd> Wall <kbd>3</kbd> Eraser <kbd>Space</kbd> Pause <kbd>C</kbd> Clear <kbd>[ ]</kbd> Brush size <kbd>- +</kbd> Fluidity <kbd>A</kbd> Toggle age color
     </div>
 
     <div id="error"></div>

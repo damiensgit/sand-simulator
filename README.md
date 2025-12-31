@@ -1,6 +1,8 @@
 # Sand Simulator
 
-A fun falling sand game built I build with my kids (using claude) with WebGPU compute shaders to demonstrate **cellular automata** - where simple rules create complex, natural-looking behavior.
+A fun falling sand game I built with my kids (using Claude) with WebGPU compute shaders to demonstrate **cellular automata** - where simple rules create complex, natural-looking behavior.
+
+**Try it live:** https://damiensgit.github.io/sand-simulator/
 
 ## What is a Cellular Automaton?
 

@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>WebGPU Sand Simulator</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            background: #1a1a2e;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            flex-direction: column;
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            color: #eee;
+            padding: 20px;
+            gap: 15px;
+        }
+
+        h1 {
+            font-size: 1.5em;
+            font-weight: 300;
+            color: #e8c547;
+            margin-bottom: 5px;
+        }
+
+        canvas {
+            border: 2px solid #444;
+            image-rendering: pixelated;
+            cursor: crosshair;
+        }
+
+        .controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+            justify-content: center;
+            max-width: 700px;
+        }
+
+        .control-group {
+            background: #252540;
+            padding: 12px 15px;
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            min-width: 120px;
+        }
+
+        .control-group.wide {
+            min-width: 180px;
+        }
+
+        .control-group label {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            color: #888;
+        }
+
+        .control-group .value {
+            font-size: 14px;
+            color: #e8c547;
+            font-weight: 500;
+        }
+
+        input[type="range"] {
+            width: 100%;
+            height: 6px;
+            -webkit-appearance: none;
+            background: #1a1a2e;
+            border-radius: 3px;
+            outline: none;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            background: #e8c547;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+
+        input[type="color"] {
+            -webkit-appearance: none;
+            width: 40px;
+            height: 30px;
+            border: 2px solid #444;
+            border-radius: 5px;
+            background: none;
+            cursor: pointer;
+            padding: 0;
+        }
+
+        input[type="color"]::-webkit-color-swatch-wrapper {
+            padding: 2px;
+        }
+
+        input[type="color"]::-webkit-color-swatch {
+            border: none;
+            border-radius: 3px;
+        }
+
+        .color-row {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .checkbox-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            font-size: 12px;
+            color: #aaa;
+        }
+
+        .checkbox-label input[type="checkbox"] {
+            width: 16px;
+            height: 16px;
+            accent-color: #e8c547;
+            cursor: pointer;
+        }
+
+        .material-buttons {
+            display: flex;
+            gap: 5px;
+        }
+
+        .material-btn {
+            flex: 1;
+            padding: 8px 12px;
+            border: 2px solid #444;
+            background: #1a1a2e;
+            color: #aaa;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 12px;
+            font-weight: 500;
+            transition: all 0.15s;
+        }
+
+        .material-btn:hover {
+            border-color: #666;
+            color: #fff;
+        }
+
+        .material-btn.active {
+            border-color: #e8c547;
+            color: #e8c547;
+            background: #2a2a4a;
+        }
+
+        .material-btn.sand { border-color: #e8c547; }
+        .material-btn.sand.active { background: #3d3520; }
+
+        .material-btn.wall { border-color: #7a7a8a; }
+        .material-btn.wall.active { background: #2a2a35; border-color: #9a9aaa; color: #9a9aaa; }
+
+        .material-btn.eraser { border-color: #e85454; }
+        .material-btn.eraser.active { background: #3d2020; border-color: #ff6b6b; color: #ff6b6b; }
+
+        .action-buttons {
+            display: flex;
+            gap: 8px;
+        }
+
+        .action-btn {
+            padding: 10px 20px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 13px;
+            font-weight: 600;
+            transition: all 0.15s;
+        }
+
+        .action-btn.pause {
+            background: #4a9eff;
+            color: #fff;
+        }
+        .action-btn.pause:hover { background: #6ab0ff; }
+        .action-btn.pause.paused { background: #4adf7c; }
+        .action-btn.pause.paused:hover { background: #6aef9c; }
+
+        .action-btn.clear {
+            background: #e85454;
+            color: #fff;
+        }
+        .action-btn.clear:hover { background: #ff6b6b; }
+
+        #info {
+            font-size: 13px;
+            color: #666;
+        }
+
+        #fps {
+            color: #4adf7c;
+            font-weight: 500;
+        }
+
+        #error {
+            color: #ff6b6b;
+            padding: 20px;
+            max-width: 600px;
+            text-align: center;
+        }
+
+        .keyboard-hints {
+            font-size: 11px;
+            color: #555;
+            text-align: center;
+            line-height: 1.8;
+        }
+
+        kbd {
+            background: #252540;
+            padding: 2px 6px;
+            border-radius: 3px;
+            font-family: inherit;
+        }
+    </style>
+</head>
+<body>
+    <h1>Sand Simulator</h1>
+
+    <canvas id="canvas"></canvas>
+
+    <div class="controls">
+        <div class="control-group">
+            <label>Material</label>
+            <div class="material-buttons">
+                <button class="material-btn sand active" data-material="sand">Sand</button>
+                <button class="material-btn wall" data-material="wall">Wall</button>
+                <button class="material-btn eraser" data-material="eraser">Erase</button>
+            </div>
+        </div>
+
+        <div class="control-group wide">
+            <label>Sand Color</label>
+            <div class="color-row">
+                <input type="color" id="sandColor" value="#ebc969">
+                <label class="checkbox-label">
+                    <input type="checkbox" id="colorByAge">
+                    Color by age
+                </label>
+            </div>
+        </div>
+
+        <div class="control-group">
+            <label>Brush Size: <span class="value" id="brushValue">3</span></label>
+            <input type="range" id="brushSize" min="1" max="15" value="3">
+        </div>
+
+        <div class="control-group">
+            <label>Sim Speed: <span class="value" id="speedValue">4</span>x</label>
+            <input type="range" id="simSpeed" min="1" max="16" value="4">
+        </div>
+
+        <div class="control-group">
+            <label>Actions</label>
+            <div class="action-buttons">
+                <button class="action-btn pause" id="pauseBtn">Pause</button>
+                <button class="action-btn clear" id="clearBtn">Clear</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="info">
+        <span id="fps">-- FPS</span> |
+        <span id="particleCount">0</span> particles
+    </div>
+
+    <div class="keyboard-hints">
+        <kbd>1</kbd> Sand <kbd>2</kbd> Wall <kbd>3</kbd> Eraser <kbd>Space</kbd> Pause <kbd>C</kbd> Clear <kbd>[ ]</kbd> Brush size <kbd>A</kbd> Toggle age color
+    </div>
+
+    <div id="error"></div>
+    <script type="module" src="main.js"></script>
+</body>
+</html>

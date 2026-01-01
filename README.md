@@ -10,9 +10,11 @@ Imagine a grid of tiny squares (cells). Each cell follows simple rules based on 
 
 - **Sand falls down** if there's empty space below
 - **Sand slides diagonally** if it can't fall straight down
-- **Sand settles sideways** to form natural-looking piles
+- **Water spreads out** and flows to find the lowest point
+- **Lava glows** and turns to rock when it cools
+- **Steam rises** and eventually condenses back to water
 
-Even though each cell only knows about itself and its neighbors, together they create realistic sand physics!
+Even though each cell only knows about itself and its neighbors, together they create realistic physics!
 
 ## How to Run
 
@@ -25,12 +27,16 @@ Even though each cell only knows about itself and its neighbors, together they c
 | Key | Action |
 |-----|--------|
 | **1** | Select Sand |
-| **2** | Select Wall |
-| **3** | Select Eraser |
+| **2** | Select Water |
+| **3** | Select Lava |
+| **4** | Select Wall |
+| **5** | Select Eraser |
 | **Space** | Pause/Resume |
 | **C** | Clear everything |
 | **[ ]** | Decrease/Increase brush size |
 | **- +** | Decrease/Increase fluidity |
+| **g/G** | Decrease/Increase gravity |
+| **t/T** | Decrease/Increase temperature (±50°C) |
 | **A** | Toggle age-based coloring |
 
 ## The Cool Tech Stuff
@@ -48,7 +54,24 @@ This avoids conflicts when multiple sand particles might want to move to the sam
 1. **Build a funnel** with walls and pour sand through it
 2. **Set fluidity to 0** - sand becomes sticky and forms tall columns
 3. **Set fluidity to 100** - sand flows like water
-4. **Turn on "Color by age"** - watch how fresh sand (bright) settles into old sand (dark)
+4. **Pour water on sand** - watch the sand sink through the water!
+5. **Mix lava and water** - creates steam and rock
+6. **Lower gravity** - watch materials float and fall slowly
+7. **Raise temperature** - water evaporates into steam, rock melts into lava
+8. **Lower temperature** - water freezes into ice, lava solidifies into rock
+9. **Turn on "Color by age"** - watch how fresh particles (bright) settle into old ones (dark)
+
+## Materials
+
+| Material | Behavior |
+|----------|----------|
+| **Sand** | Falls, piles up, sinks in water |
+| **Water** | Flows, spreads out, evaporates when hot |
+| **Lava** | Flows slowly, glows, turns to rock when cool |
+| **Wall** | Solid, doesn't move |
+| **Steam** | Rises up, condenses back to water |
+| **Ice** | Frozen water, melts when warm |
+| **Rock** | Cooled lava, melts at extreme heat |
 
 ## Files
 

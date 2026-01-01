@@ -7,6 +7,11 @@ const WORKGROUP_SIZE = 8;
 const EMPTY = 0;
 const SAND = 1;
 const WALL = 2;
+const WATER = 3;
+const STEAM = 4;
+const ICE = 5;
+const LAVA = 6;
+const ROCK = 7;
 
 // Simulation state
 let simSpeed = 4;
@@ -16,6 +21,10 @@ let isPaused = false;
 let sandColor = [0.92, 0.79, 0.41]; // Default sand color (RGB 0-1)
 let colorByAge = false;
 let fluidity = 50; // 0 = sticky, 100 = very fluid
+
+// World parameters
+let gravity = 1.0;      // 0.1 = moon, 1.0 = earth, 3.0 = heavy
+let temperature = 20;   // Celsius: -50 to 1500
 
 async function init() {
     if (!navigator.gpu) {
@@ -97,22 +106,85 @@ async function init() {
     clearGrid();
 
     // Compute shader with improved physics + age tracking
-    const computeShader = device.createShaderModule({
-        label: 'Sand Compute Shader',
-        code: `
+    const computeShaderCode = `
             @group(0) @binding(0) var inputTex: texture_storage_2d<r32uint, read>;
             @group(0) @binding(1) var outputTex: texture_storage_2d<r32uint, write>;
             @group(0) @binding(2) var<uniform> params: vec4u; // frame, width, height, fluidity (0-100)
             @group(0) @binding(3) var spawnTex: texture_storage_2d<r32uint, read>; // spawn requests
+            @group(0) @binding(4) var<uniform> worldParams: vec4f; // gravity, temperature, 0, 0
 
+            // Material types
             const EMPTY: u32 = 0u;
             const SAND: u32 = 1u;
             const WALL: u32 = 2u;
+            const WATER: u32 = 3u;
+            const STEAM: u32 = 4u;
+            const ICE: u32 = 5u;
+            const LAVA: u32 = 6u;
+            const ROCK: u32 = 7u;
+
+            // Bit packing constants
             const TYPE_MASK: u32 = 0xFFu;
             const AGE_MASK: u32 = 0xFFFFu;
             const AGE_SHIFT: u32 = 8u;
             const COLOR_SHIFT: u32 = 24u;
             const MAX_AGE: u32 = 65535u;
+
+            // Material property functions
+            fn getMaterialDensity(mat: u32) -> f32 {
+                // Higher = sinks, Lower = floats, 0 = empty air
+                switch(mat) {
+                    case 1u: { return 2.0; }   // SAND - sinks in water/lava
+                    case 2u: { return 999.0; } // WALL - immovable
+                    case 3u: { return 1.0; }   // WATER - baseline liquid
+                    case 4u: { return 0.1; }   // STEAM - rises
+                    case 5u: { return 0.9; }   // ICE - floats on water
+                    case 6u: { return 3.0; }   // LAVA - very heavy liquid
+                    case 7u: { return 999.0; } // ROCK - immovable solid
+                    default: { return 0.0; }   // EMPTY - air
+                }
+            }
+
+            fn getMaterialFluidity(mat: u32) -> f32 {
+                // How easily it flows (0 = solid, 1 = very liquid)
+                switch(mat) {
+                    case 1u: { return 0.4; }   // SAND - granular
+                    case 3u: { return 1.0; }   // WATER - max fluid
+                    case 4u: { return 1.0; }   // STEAM - max fluid (but rises)
+                    case 6u: { return 0.6; }   // LAVA - viscous
+                    default: { return 0.0; }   // Solids don't flow
+                }
+            }
+
+            fn isLiquid(mat: u32) -> bool {
+                return mat == WATER || mat == LAVA;
+            }
+
+            fn isGas(mat: u32) -> bool {
+                return mat == STEAM;
+            }
+
+            fn isSolid(mat: u32) -> bool {
+                // Only WALL is truly immovable - rock and ice can fall
+                return mat == WALL;
+            }
+
+            fn isMovable(mat: u32) -> bool {
+                // Rock and ice fall like sand, so they're movable
+                return mat == SAND || mat == WATER || mat == STEAM || mat == LAVA || mat == ROCK || mat == ICE;
+            }
+
+            fn isFalling(mat: u32) -> bool {
+                // Materials that fall down (not steam which rises)
+                return mat == SAND || mat == WATER || mat == LAVA || mat == ROCK || mat == ICE;
+            }
+
+            fn canDisplace(mover: u32, dest: u32) -> bool {
+                // Can mover displace dest? (based on density)
+                if (dest == EMPTY) { return true; }
+                if (dest == WALL || dest == ROCK) { return false; }
+                return getMaterialDensity(mover) > getMaterialDensity(dest);
+            }
 
             // Simple hash for randomness
             fn hash(p: vec2u, seed: u32) -> u32 {
@@ -152,6 +224,7 @@ async function init() {
 
             fn getSandMovement(pos: vec2i, rng: u32) -> vec2i {
                 let below = getCell(pos + vec2i(0, 1));
+                // Sand falls into EMPTY space only (simplified - no density displacement)
                 if (below == EMPTY) {
                     return vec2i(0, 1);
                 }
@@ -161,19 +234,27 @@ async function init() {
                 let left = getCell(pos + vec2i(-1, 0));
                 let right = getCell(pos + vec2i(1, 0));
 
-                var canFallLeft = belowLeft == EMPTY;
-                var canFallRight = belowRight == EMPTY;
+                // Diagonal fall - only into EMPTY cells
+                var canFallLeft = belowLeft == EMPTY && left == EMPTY;
+                var canFallRight = belowRight == EMPTY && right == EMPTY;
 
                 // Check for priority conflicts - sand directly beside us falling straight down
+                // Block diagonal if neighbor CAN fall straight (they have priority)
                 if (canFallLeft && left == SAND) {
-                    canFallLeft = false;
+                    let leftBelow = getCell(pos + vec2i(-1, 1));
+                    if (leftBelow == EMPTY) {
+                        canFallLeft = false;
+                    }
                 }
                 if (canFallRight && right == SAND) {
-                    canFallRight = false;
+                    let rightBelow = getCell(pos + vec2i(1, 1));
+                    if (rightBelow == EMPTY) {
+                        canFallRight = false;
+                    }
                 }
 
-                // Randomize direction choice for natural spreading
-                let preferLeft = (rng % 2u) == 0u;
+                // Position-based direction to prevent diagonal collisions
+                let preferLeft = (pos.x % 2) == 0;
 
                 if (canFallLeft && canFallRight) {
                     if (preferLeft) {
@@ -252,12 +333,279 @@ async function init() {
                 return vec2i(0, 0);
             }
 
+            // Liquid movement - fall, then horizontal leveling, then diagonal
+            fn getLiquidMovement(pos: vec2i, rng: u32, liquidType: u32, frame: u32) -> vec2i {
+                let gravity = worldParams.x;
+                let gravityRoll = f32(rng % 100u) / 100.0;
+                if (gravityRoll > gravity) {
+                    return vec2i(0, 0);
+                }
+
+                let below = getCell(pos + vec2i(0, 1));
+                let left = getCell(pos + vec2i(-1, 0));
+                let right = getCell(pos + vec2i(1, 0));
+                let belowLeft = getCell(pos + vec2i(-1, 1));
+                let belowRight = getCell(pos + vec2i(1, 1));
+
+                // 1. FALL STRAIGHT DOWN
+                if (below == EMPTY) {
+                    return vec2i(0, 1);
+                }
+
+                let preferLeft = ((u32(pos.x) + frame) & 1u) == 0u;
+
+                // 2. HORIZONTAL SPREAD
+                let canSpreadLeft = left == EMPTY;
+                let canSpreadRight = right == EMPTY;
+
+                if (canSpreadLeft && canSpreadRight) {
+                    if (preferLeft) {
+                        return vec2i(-1, 0);
+                    }
+                    return vec2i(1, 0);
+                } else if (canSpreadLeft) {
+                    return vec2i(-1, 0);
+                } else if (canSpreadRight) {
+                    return vec2i(1, 0);
+                }
+
+                // 3. DIAGONAL FALL
+                let canFallLeft = belowLeft == EMPTY && left == EMPTY;
+                let canFallRight = belowRight == EMPTY && right == EMPTY;
+
+                if (canFallLeft && canFallRight) {
+                    if (preferLeft) {
+                        return vec2i(-1, 1);
+                    }
+                    return vec2i(1, 1);
+                } else if (canFallLeft) {
+                    return vec2i(-1, 1);
+                } else if (canFallRight) {
+                    return vec2i(1, 1);
+                }
+
+                return vec2i(0, 0);
+            }
+
+            // Gas movement (steam) - rises and drifts
+            fn getGasMovement(pos: vec2i, rng: u32) -> vec2i {
+                let gravity = worldParams.x;
+
+                // Gases always try to rise (inverted gravity effect)
+                let above = getCell(pos + vec2i(0, -1));
+
+                // Rise into empty space
+                if (above == EMPTY) {
+                    // In high gravity, steam rises slower
+                    if (f32(rng % 100u) / 100.0 < (2.0 - gravity)) {
+                        return vec2i(0, -1);
+                    }
+                }
+
+                // Diagonal rise
+                let aboveLeft = getCell(pos + vec2i(-1, -1));
+                let aboveRight = getCell(pos + vec2i(1, -1));
+                let left = getCell(pos + vec2i(-1, 0));
+                let right = getCell(pos + vec2i(1, 0));
+
+                let canRiseLeft = aboveLeft == EMPTY && left == EMPTY;
+                let canRiseRight = aboveRight == EMPTY && right == EMPTY;
+
+                // Position-based direction to prevent collisions
+                let preferLeft = (pos.x % 2) == 0;
+
+                if (canRiseLeft && canRiseRight) {
+                    if (preferLeft) { return vec2i(-1, -1); }
+                    else { return vec2i(1, -1); }
+                } else if (canRiseLeft) {
+                    return vec2i(-1, -1);
+                } else if (canRiseRight) {
+                    return vec2i(1, -1);
+                }
+
+                // Horizontal drift when can't rise (random chance to drift)
+                if ((rng % 3u) == 0u) {
+                    if (left == EMPTY && preferLeft) { return vec2i(-1, 0); }
+                    if (right == EMPTY && !preferLeft) { return vec2i(1, 0); }
+                }
+
+                return vec2i(0, 0);
+            }
+
+            // Solid falling movement (rock, ice) - falls but doesn't spread horizontally
+            fn getSolidFallMovement(pos: vec2i, rng: u32) -> vec2i {
+                let below = getCell(pos + vec2i(0, 1));
+                if (below == EMPTY) {
+                    return vec2i(0, 1);
+                }
+
+                // Diagonal fall only
+                let belowLeft = getCell(pos + vec2i(-1, 1));
+                let belowRight = getCell(pos + vec2i(1, 1));
+                let left = getCell(pos + vec2i(-1, 0));
+                let right = getCell(pos + vec2i(1, 0));
+
+                let canFallLeft = belowLeft == EMPTY && left == EMPTY;
+                let canFallRight = belowRight == EMPTY && right == EMPTY;
+
+                // Position-based direction to prevent collisions
+                let preferLeft = (pos.x % 2) == 0;
+
+                if (canFallLeft && canFallRight) {
+                    if (preferLeft) { return vec2i(-1, 1); }
+                    else { return vec2i(1, 1); }
+                } else if (canFallLeft) {
+                    return vec2i(-1, 1);
+                } else if (canFallRight) {
+                    return vec2i(1, 1);
+                }
+
+                return vec2i(0, 0);
+            }
+
+            // General movement dispatcher
+            fn getMovement(cellType: u32, pos: vec2i, rng: u32, frame: u32) -> vec2i {
+                if (cellType == SAND) { return getSandMovement(pos, rng); }
+                if (cellType == WATER) { return getLiquidMovement(pos, rng, WATER, frame); }
+                if (cellType == LAVA) { return getLiquidMovement(pos, rng, LAVA, frame); }
+                if (cellType == STEAM) { return getGasMovement(pos, rng); }
+                if (cellType == ROCK || cellType == ICE) { return getSolidFallMovement(pos, rng); }
+                return vec2i(0, 0);  // WALL doesn't move
+            }
+
+            // Temperature state changes (temp is in Celsius)
+            fn applyTemperature(cellType: u32, temp: f32, rng: u32) -> u32 {
+                // Water state changes
+                if (cellType == WATER) {
+                    if (temp < 0.0 && rng % 100u < 3u) { return ICE; }     // Freeze below 0°C
+                    if (temp > 100.0 && rng % 100u < 3u) { return STEAM; } // Boil above 100°C
+                }
+                if (cellType == ICE) {
+                    if (temp > 0.0 && rng % 100u < 5u) { return WATER; }   // Melt above 0°C
+                }
+                if (cellType == STEAM) {
+                    if (temp < 100.0 && rng % 100u < 3u) { return WATER; } // Condense below 100°C
+                }
+
+                // Lava state changes - only from extreme temperatures
+                // Normal solidification happens via water contact (checkMaterialInteraction)
+                if (cellType == LAVA) {
+                    if (temp < -20.0 && rng % 100u < 2u) { return ROCK; }  // Freeze only at extreme cold
+                }
+                if (cellType == ROCK) {
+                    if (temp > 1200.0 && rng % 100u < 1u) { return LAVA; } // Melt above 1200°C
+                }
+
+                return cellType;  // No change
+            }
+
+            // Material interactions (lava + water)
+            fn checkMaterialInteraction(pos: vec2i, current: u32, rng: u32) -> u32 {
+                // Check adjacent cells for interactions
+                let neighborBelow = getCell(pos + vec2i(0, 1));
+                let neighborAbove = getCell(pos + vec2i(0, -1));
+                let neighborLeft = getCell(pos + vec2i(-1, 0));
+                let neighborRight = getCell(pos + vec2i(1, 0));
+
+                // Water + Lava = Steam (water becomes steam)
+                if (current == WATER) {
+                    if (neighborBelow == LAVA || neighborAbove == LAVA ||
+                        neighborLeft == LAVA || neighborRight == LAVA) {
+                        if (rng % 100u < 50u) { return STEAM; }
+                    }
+                }
+
+                // Lava + Water = Rock (lava becomes rock)
+                if (current == LAVA) {
+                    if (neighborBelow == WATER || neighborAbove == WATER ||
+                        neighborLeft == WATER || neighborRight == WATER) {
+                        if (rng % 100u < 50u) { return ROCK; }
+                    }
+                }
+
+                return current;
+            }
+
+            // Check if material from a neighbor is moving into this position
+            fn checkIncoming(pos: vec2i, fromOffset: vec2i, frame: u32) -> u32 {
+                let fromPos = pos + fromOffset;
+                let fromRaw = getRawCell(fromPos);
+                let fromType = getType(fromRaw);
+
+                if (!isMovable(fromType)) { return 0u; }
+
+                let fromRng = hash(vec2u(u32(fromPos.x), u32(fromPos.y)), frame);
+                let movement = getMovement(fromType, fromPos, fromRng, frame);
+
+                if (fromPos.x + movement.x == pos.x && fromPos.y + movement.y == pos.y) {
+                    return fromRaw;
+                }
+                return 0u;
+            }
+
+            // Check if any higher-priority neighbor would move into destPos
+            fn hasHigherPriorityIncoming(destPos: vec2i, myOffset: vec2i, frame: u32) -> bool {
+                let flipIncoming = ((u32(destPos.x + destPos.y) + frame) & 1u) == 1u;
+
+                if (myOffset.x == 0 && myOffset.y == -1) { return false; }
+                if (checkIncoming(destPos, vec2i(0, -1), frame) != 0u) { return true; }
+
+                if (!flipIncoming) {
+                    if (myOffset.x == -1 && myOffset.y == 0) { return false; }
+                    if (checkIncoming(destPos, vec2i(-1, 0), frame) != 0u) { return true; }
+
+                    if (myOffset.x == 1 && myOffset.y == 0) { return false; }
+                    if (checkIncoming(destPos, vec2i(1, 0), frame) != 0u) { return true; }
+                } else {
+                    if (myOffset.x == 1 && myOffset.y == 0) { return false; }
+                    if (checkIncoming(destPos, vec2i(1, 0), frame) != 0u) { return true; }
+
+                    if (myOffset.x == -1 && myOffset.y == 0) { return false; }
+                    if (checkIncoming(destPos, vec2i(-1, 0), frame) != 0u) { return true; }
+                }
+
+                if (!flipIncoming) {
+                    if (myOffset.x == -1 && myOffset.y == -1) { return false; }
+                    if (checkIncoming(destPos, vec2i(-1, -1), frame) != 0u) { return true; }
+
+                    if (myOffset.x == 1 && myOffset.y == -1) { return false; }
+                    if (checkIncoming(destPos, vec2i(1, -1), frame) != 0u) { return true; }
+                } else {
+                    if (myOffset.x == 1 && myOffset.y == -1) { return false; }
+                    if (checkIncoming(destPos, vec2i(1, -1), frame) != 0u) { return true; }
+
+                    if (myOffset.x == -1 && myOffset.y == -1) { return false; }
+                    if (checkIncoming(destPos, vec2i(-1, -1), frame) != 0u) { return true; }
+                }
+
+                if (myOffset.x == 0 && myOffset.y == 1) { return false; }
+                if (checkIncoming(destPos, vec2i(0, 1), frame) != 0u) { return true; }
+
+                if (!flipIncoming) {
+                    if (myOffset.x == -1 && myOffset.y == 1) { return false; }
+                    if (checkIncoming(destPos, vec2i(-1, 1), frame) != 0u) { return true; }
+
+                    if (myOffset.x == 1 && myOffset.y == 1) { return false; }
+                    if (checkIncoming(destPos, vec2i(1, 1), frame) != 0u) { return true; }
+                } else {
+                    if (myOffset.x == 1 && myOffset.y == 1) { return false; }
+                    if (checkIncoming(destPos, vec2i(1, 1), frame) != 0u) { return true; }
+
+                    if (myOffset.x == -1 && myOffset.y == 1) { return false; }
+                    if (checkIncoming(destPos, vec2i(-1, 1), frame) != 0u) { return true; }
+                }
+
+                return false;
+            }
+
+
             @compute @workgroup_size(${WORKGROUP_SIZE}, ${WORKGROUP_SIZE})
             fn main(@builtin(global_invocation_id) id: vec3u) {
                 let pos = vec2i(id.xy);
                 let width = i32(params.y);
                 let height = i32(params.z);
                 let frame = params.x;
+                let temp = worldParams.y;
 
                 if (pos.x >= width || pos.y >= height) {
                     return;
@@ -271,138 +619,137 @@ async function init() {
                 // Generate randomness for this cell
                 let rng = hash(vec2u(id.xy), frame);
 
-                // Read spawn request (handle later after checking incoming sand)
+                // Read spawn request
                 let spawnRequest = textureLoad(spawnTex, pos).r;
 
                 var resultType = current;
                 var resultAge = currentAge;
                 var resultColorVar = currentColorVar;
 
-                if (current == WALL) {
-                    // Check for eraser
-                    if (spawnRequest == 255u) {
-                        resultType = EMPTY;
-                        resultAge = 0u;
-                        resultColorVar = 0u;
-                    } else {
-                        resultType = WALL;
-                        resultAge = 0u;
-                        resultColorVar = 0u;
-                    }
+                // Handle eraser for any material
+                if (spawnRequest == 255u && current != EMPTY) {
+                    resultType = EMPTY;
+                    resultAge = 0u;
+                    resultColorVar = 0u;
+                    textureStore(outputTex, pos, vec4u(packCell(resultType, resultAge, resultColorVar), 0u, 0u, 0u));
+                    return;
                 }
-                else if (current == SAND) {
-                    // Check for eraser
-                    if (spawnRequest == 255u) {
-                        resultType = EMPTY;
+
+                // Immovable solids (WALL only)
+                if (isSolid(current)) {
+                    textureStore(outputTex, pos, vec4u(packCell(resultType, resultAge, resultColorVar), 0u, 0u, 0u));
+                    return;
+                }
+
+                // Movable materials (SAND, WATER, LAVA, STEAM, ROCK, ICE)
+                if (isMovable(current)) {
+                    // Check for material interactions first
+                    let interacted = checkMaterialInteraction(pos, current, rng);
+                    if (interacted != current) {
+                        resultType = interacted;
                         resultAge = 0u;
-                        resultColorVar = 0u;
-                    } else {
-                        let movement = getSandMovement(pos, rng);
-                        if (movement.x != 0 || movement.y != 0) {
-                            resultType = EMPTY;
-                            resultAge = 0u;
-                            resultColorVar = 0u;
-                        } else {
-                            resultType = SAND;
-                            resultAge = currentAge + 1u; // Age increases when stationary
+                        textureStore(outputTex, pos, vec4u(packCell(resultType, resultAge, resultColorVar), 0u, 0u, 0u));
+                        return;
+                    }
+
+                    // Apply temperature effects
+                    let tempChanged = applyTemperature(current, temp, rng);
+                    if (tempChanged != current) {
+                        resultType = tempChanged;
+                        resultAge = 0u;
+                        textureStore(outputTex, pos, vec4u(packCell(resultType, resultAge, resultColorVar), 0u, 0u, 0u));
+                        return;
+                    }
+
+                    // Check movement
+                    var movement = getMovement(current, pos, rng, frame);
+                    if (movement.x != 0 || movement.y != 0) {
+                        let destPos = pos + movement;
+                        let myOffset = vec2i(-movement.x, -movement.y);
+                        if (hasHigherPriorityIncoming(destPos, myOffset, frame)) {
+                            movement = vec2i(0, 0);
                         }
                     }
+
+                    if (movement.x != 0 || movement.y != 0) {
+                        // Moving - become empty (higher-priority checks prevent conflicts)
+                        resultType = EMPTY;
+                        resultAge = 0u;
+                        resultColorVar = 0u;
+                    } else {
+                        // Staying put - age increases
+                        resultAge = currentAge + 1u;
+                    }
                 }
-                else if (current == EMPTY) {
-                    // First check for incoming sand from various directions
+
+                // EMPTY cell - check for incoming materials
+                if (current == EMPTY || resultType == EMPTY) {
                     var incomingRaw = 0u;
+                    let flipIncoming = ((u32(pos.x + pos.y) + frame) & 1u) == 1u;
 
-                    // From directly above
-                    let above = pos + vec2i(0, -1);
-                    let aboveRaw = getRawCell(above);
-                    if (getType(aboveRaw) == SAND) {
-                        let aboveRng = hash(vec2u(u32(above.x), u32(above.y)), frame);
-                        let movement = getSandMovement(above, aboveRng);
-                        if (above.x + movement.x == pos.x && above.y + movement.y == pos.y) {
-                            resultType = SAND;
-                            incomingRaw = aboveRaw;
-                        }
+                    // Check incoming in priority order (above has highest priority)
+                    // Vertical falling - highest priority
+                    if (incomingRaw == 0u) { incomingRaw = checkIncoming(pos, vec2i(0, -1), frame); }
+                    // Horizontal spreading - second priority
+                    if (!flipIncoming) {
+                        if (incomingRaw == 0u) { incomingRaw = checkIncoming(pos, vec2i(-1, 0), frame); }
+                        if (incomingRaw == 0u) { incomingRaw = checkIncoming(pos, vec2i(1, 0), frame); }
+                    } else {
+                        if (incomingRaw == 0u) { incomingRaw = checkIncoming(pos, vec2i(1, 0), frame); }
+                        if (incomingRaw == 0u) { incomingRaw = checkIncoming(pos, vec2i(-1, 0), frame); }
+                    }
+                    // Diagonal falling - third priority
+                    if (!flipIncoming) {
+                        if (incomingRaw == 0u) { incomingRaw = checkIncoming(pos, vec2i(-1, -1), frame); }
+                        if (incomingRaw == 0u) { incomingRaw = checkIncoming(pos, vec2i(1, -1), frame); }
+                    } else {
+                        if (incomingRaw == 0u) { incomingRaw = checkIncoming(pos, vec2i(1, -1), frame); }
+                        if (incomingRaw == 0u) { incomingRaw = checkIncoming(pos, vec2i(-1, -1), frame); }
+                    }
+                    // Rising (for gases) - lowest priority
+                    if (incomingRaw == 0u) { incomingRaw = checkIncoming(pos, vec2i(0, 1), frame); }
+                    if (!flipIncoming) {
+                        if (incomingRaw == 0u) { incomingRaw = checkIncoming(pos, vec2i(-1, 1), frame); }
+                        if (incomingRaw == 0u) { incomingRaw = checkIncoming(pos, vec2i(1, 1), frame); }
+                    } else {
+                        if (incomingRaw == 0u) { incomingRaw = checkIncoming(pos, vec2i(1, 1), frame); }
+                        if (incomingRaw == 0u) { incomingRaw = checkIncoming(pos, vec2i(-1, 1), frame); }
                     }
 
-                    // From above-left (diagonal)
-                    if (resultType == EMPTY) {
-                        let aboveLeft = pos + vec2i(-1, -1);
-                        let aboveLeftRaw = getRawCell(aboveLeft);
-                        if (getType(aboveLeftRaw) == SAND) {
-                            let alRng = hash(vec2u(u32(aboveLeft.x), u32(aboveLeft.y)), frame);
-                            let movement = getSandMovement(aboveLeft, alRng);
-                            if (aboveLeft.x + movement.x == pos.x && aboveLeft.y + movement.y == pos.y) {
-                                resultType = SAND;
-                                incomingRaw = aboveLeftRaw;
-                            }
-                        }
-                    }
-
-                    // From above-right (diagonal)
-                    if (resultType == EMPTY) {
-                        let aboveRight = pos + vec2i(1, -1);
-                        let aboveRightRaw = getRawCell(aboveRight);
-                        if (getType(aboveRightRaw) == SAND) {
-                            let arRng = hash(vec2u(u32(aboveRight.x), u32(aboveRight.y)), frame);
-                            let movement = getSandMovement(aboveRight, arRng);
-                            if (aboveRight.x + movement.x == pos.x && aboveRight.y + movement.y == pos.y) {
-                                resultType = SAND;
-                                incomingRaw = aboveRightRaw;
-                            }
-                        }
-                    }
-
-                    // From direct left (horizontal settling)
-                    if (resultType == EMPTY) {
-                        let left = pos + vec2i(-1, 0);
-                        let leftRaw = getRawCell(left);
-                        if (getType(leftRaw) == SAND) {
-                            let lRng = hash(vec2u(u32(left.x), u32(left.y)), frame);
-                            let movement = getSandMovement(left, lRng);
-                            if (left.x + movement.x == pos.x && left.y + movement.y == pos.y) {
-                                resultType = SAND;
-                                incomingRaw = leftRaw;
-                            }
-                        }
-                    }
-
-                    // From direct right (horizontal settling)
-                    if (resultType == EMPTY) {
-                        let right = pos + vec2i(1, 0);
-                        let rightRaw = getRawCell(right);
-                        if (getType(rightRaw) == SAND) {
-                            let rRng = hash(vec2u(u32(right.x), u32(right.y)), frame);
-                            let movement = getSandMovement(right, rRng);
-                            if (right.x + movement.x == pos.x && right.y + movement.y == pos.y) {
-                                resultType = SAND;
-                                incomingRaw = rightRaw;
-                            }
-                        }
-                    }
-
-                    // Handle result
-                    if (resultType == SAND) {
-                        // Incoming sand - preserve its color variation
+                    if (incomingRaw != 0u) {
+                        // Something moved in
+                        resultType = getType(incomingRaw);
                         resultAge = 0u;
                         resultColorVar = getColorVar(incomingRaw);
-                    } else if (spawnRequest > 0u && spawnRequest != 255u) {
-                        // No incoming sand, so we can spawn here
+                    } else if (current == EMPTY && spawnRequest > 0u && spawnRequest < 255u) {
+                        // Spawn new material
                         resultType = spawnRequest;
                         resultAge = 0u;
                         resultColorVar = rng % 256u;
                     }
-                    // else: stays EMPTY
                 }
 
                 textureStore(outputTex, pos, vec4u(packCell(resultType, resultAge, resultColorVar), 0u, 0u, 0u));
             }
-        `
+        `;
+
+    const computeShader = device.createShaderModule({
+        label: 'Sand Compute Shader',
+        code: computeShaderCode
+    });
+
+    // Check for shader compilation errors
+    computeShader.getCompilationInfo().then(info => {
+        if (info.messages.length > 0) {
+            console.error('Compute shader compilation messages:');
+            info.messages.forEach(msg => {
+                console.error(`  ${msg.type}: ${msg.message} (line ${msg.lineNum})`);
+            });
+        }
     });
 
     // Render shader with color options
-    const renderShader = device.createShaderModule({
-        label: 'Render Shader',
-        code: `
+    const renderShaderCode = `
             @group(0) @binding(0) var inputTex: texture_2d<u32>;
             @group(0) @binding(1) var<uniform> colorParams: vec4f; // r, g, b, colorByAge
 
@@ -449,6 +796,16 @@ async function init() {
                 return rgb + vec3f(v - c);
             }
 
+            // Material type constants for rendering
+            const EMPTY_R: u32 = 0u;
+            const SAND_R: u32 = 1u;
+            const WALL_R: u32 = 2u;
+            const WATER_R: u32 = 3u;
+            const STEAM_R: u32 = 4u;
+            const ICE_R: u32 = 5u;
+            const LAVA_R: u32 = 6u;
+            const ROCK_R: u32 = 7u;
+
             @fragment
             fn fs(in: VertexOutput) -> @location(0) vec4f {
                 let texSize = vec2f(textureDimensions(inputTex));
@@ -459,36 +816,72 @@ async function init() {
                 let age = (rawCell >> AGE_SHIFT) & AGE_MASK;
                 let colorVar = rawCell >> COLOR_SHIFT; // 0-255 per-particle variation
 
-                if (cellType == 1u) {
-                    // Sand
-                    let baseColor = vec3f(colorParams.r, colorParams.g, colorParams.b);
+                // Per-particle brightness variation
+                let varNorm = f32(colorVar) / 255.0;
+                let brightMult = 0.95 + varNorm * 0.10;
 
-                    // Subtle per-particle brightness variation: ±5%
-                    let varNorm = f32(colorVar) / 255.0; // 0-1
-                    let brightMult = 0.95 + varNorm * 0.10; // 0.95 to 1.05
+                if (cellType == SAND_R) {
+                    // Sand - user-selected color
+                    let baseColor = vec3f(colorParams.r, colorParams.g, colorParams.b);
 
                     if (colorParams.a > 0.5) {
                         // Color by age mode
                         let normalizedAge = min(f32(age) / 500.0, 1.0);
-
-                        // Young sand: bright/saturated, Old sand: darker/more muted
                         let hue = 0.08 - normalizedAge * 0.06;
                         let sat = 0.9 - normalizedAge * 0.3;
                         let val = (1.0 - normalizedAge * 0.5) * brightMult;
-
                         return vec4f(hsv2rgb(hue, sat, clamp(val, 0.2, 1.0)), 1.0);
                     } else {
                         // Standard color with subtle per-particle brightness variation
                         return vec4f(clamp(baseColor * brightMult, vec3f(0.0), vec3f(1.0)), 1.0);
                     }
-                } else if (cellType == 2u) {
-                    // Wall
+                } else if (cellType == WALL_R) {
+                    // Wall - gray stone
                     return vec4f(0.45, 0.45, 0.5, 1.0);
+                } else if (cellType == WATER_R) {
+                    // Water - blue, semi-transparent look
+                    let waterBlue = vec3f(0.2, 0.5, 0.9) * brightMult;
+                    // Add slight wave effect based on position and age
+                    let wave = sin(f32(age) * 0.1 + varNorm * 6.28) * 0.05;
+                    return vec4f(clamp(waterBlue + wave, vec3f(0.0), vec3f(1.0)), 1.0);
+                } else if (cellType == STEAM_R) {
+                    // Steam - white/gray, translucent effect
+                    let steamGray = 0.7 + varNorm * 0.2;
+                    // Fade with age (dissipation visual)
+                    let fade = 1.0 - min(f32(age) / 200.0, 0.5);
+                    return vec4f(steamGray * fade, steamGray * fade, steamGray * fade * 1.05, 1.0);
+                } else if (cellType == ICE_R) {
+                    // Ice - light blue, crystalline
+                    let iceColor = vec3f(0.7, 0.85, 0.95) * brightMult;
+                    return vec4f(iceColor, 1.0);
+                } else if (cellType == LAVA_R) {
+                    // Lava - glowing orange/red with pulsing effect
+                    let pulse = sin(f32(age) * 0.15 + varNorm * 3.14) * 0.15 + 0.85;
+                    let lavaColor = vec3f(1.0, 0.3 + varNorm * 0.2, 0.1) * pulse;
+                    return vec4f(clamp(lavaColor, vec3f(0.0), vec3f(1.0)), 1.0);
+                } else if (cellType == ROCK_R) {
+                    // Rock - dark gray, solid
+                    let rockColor = vec3f(0.3, 0.28, 0.28) * brightMult;
+                    return vec4f(rockColor, 1.0);
                 }
-                // Empty
+                // Empty - dark background
                 return vec4f(0.08, 0.08, 0.12, 1.0);
             }
-        `
+        `;
+
+    const renderShader = device.createShaderModule({
+        label: 'Render Shader',
+        code: renderShaderCode
+    });
+
+    // Check for render shader compilation errors
+    renderShader.getCompilationInfo().then(info => {
+        if (info.messages.length > 0) {
+            console.error('Render shader compilation messages:');
+            info.messages.forEach(msg => {
+                console.error(`  ${msg.type}: ${msg.message} (line ${msg.lineNum})`);
+            });
+        }
     });
 
     // Pipelines
@@ -516,6 +909,11 @@ async function init() {
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
 
+    const worldParamsBuffer = device.createBuffer({
+        size: 16,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
     // Compute bind groups
     const spawnTextureView = spawnTexture.createView();
     const computeBindGroups = [
@@ -526,6 +924,7 @@ async function init() {
                 { binding: 1, resource: textures[1].createView() },
                 { binding: 2, resource: { buffer: paramsBuffer } },
                 { binding: 3, resource: spawnTextureView },
+                { binding: 4, resource: { buffer: worldParamsBuffer } },
             ],
         }),
         device.createBindGroup({
@@ -535,6 +934,7 @@ async function init() {
                 { binding: 1, resource: textures[0].createView() },
                 { binding: 2, resource: { buffer: paramsBuffer } },
                 { binding: 3, resource: spawnTextureView },
+                { binding: 4, resource: { buffer: worldParamsBuffer } },
             ],
         }),
     ];
@@ -605,6 +1005,26 @@ async function init() {
         speedValueDisplay.textContent = simSpeed;
     });
 
+    // World parameter controls
+    const gravitySlider = document.getElementById('gravity');
+    const gravityValueDisplay = document.getElementById('gravityValue');
+    const temperatureSlider = document.getElementById('temperature');
+    const temperatureValueDisplay = document.getElementById('temperatureValue');
+
+    if (gravitySlider) {
+        gravitySlider.addEventListener('input', (e) => {
+            gravity = parseFloat(e.target.value);
+            gravityValueDisplay.textContent = gravity.toFixed(1);
+        });
+    }
+
+    if (temperatureSlider) {
+        temperatureSlider.addEventListener('input', (e) => {
+            temperature = parseInt(e.target.value);
+            temperatureValueDisplay.textContent = temperature + '°C';
+        });
+    }
+
     // Material selection
     materialBtns.forEach(btn => {
         btn.addEventListener('click', () => {
@@ -612,6 +1032,8 @@ async function init() {
             btn.classList.add('active');
             const mat = btn.dataset.material;
             if (mat === 'sand') selectedMaterial = SAND;
+            else if (mat === 'water') selectedMaterial = WATER;
+            else if (mat === 'lava') selectedMaterial = LAVA;
             else if (mat === 'wall') selectedMaterial = WALL;
             else if (mat === 'eraser') selectedMaterial = EMPTY;
         });
@@ -636,9 +1058,15 @@ async function init() {
                 selectMaterial('sand');
                 break;
             case '2':
-                selectMaterial('wall');
+                selectMaterial('water');
                 break;
             case '3':
+                selectMaterial('lava');
+                break;
+            case '4':
+                selectMaterial('wall');
+                break;
+            case '5':
                 selectMaterial('eraser');
                 break;
             case ' ':
@@ -676,6 +1104,34 @@ async function init() {
                 fluiditySlider.value = fluidity;
                 fluidityValueDisplay.textContent = fluidity;
                 break;
+            case 'g':
+                gravity = Math.max(0.1, gravity - 0.2);
+                if (gravitySlider) {
+                    gravitySlider.value = gravity;
+                    gravityValueDisplay.textContent = gravity.toFixed(1);
+                }
+                break;
+            case 'G':
+                gravity = Math.min(3.0, gravity + 0.2);
+                if (gravitySlider) {
+                    gravitySlider.value = gravity;
+                    gravityValueDisplay.textContent = gravity.toFixed(1);
+                }
+                break;
+            case 't':
+                temperature = Math.max(-50, temperature - 50);
+                if (temperatureSlider) {
+                    temperatureSlider.value = temperature;
+                    temperatureValueDisplay.textContent = temperature + '°C';
+                }
+                break;
+            case 'T':
+                temperature = Math.min(1500, temperature + 50);
+                if (temperatureSlider) {
+                    temperatureSlider.value = temperature;
+                    temperatureValueDisplay.textContent = temperature + '°C';
+                }
+                break;
         }
     });
 
@@ -684,6 +1140,8 @@ async function init() {
             b.classList.toggle('active', b.dataset.material === mat);
         });
         if (mat === 'sand') selectedMaterial = SAND;
+        else if (mat === 'water') selectedMaterial = WATER;
+        else if (mat === 'lava') selectedMaterial = LAVA;
         else if (mat === 'wall') selectedMaterial = WALL;
         else if (mat === 'eraser') selectedMaterial = EMPTY;
     }
@@ -758,7 +1216,9 @@ async function init() {
         const data = new Uint32Array(readbackBuffer.getMappedRange());
         let count = 0;
         for (let i = 0; i < data.length; i++) {
-            if ((data[i] & 0xFF) === SAND) count++;
+            const type = data[i] & 0xFF;
+            // Count all non-empty, non-wall materials
+            if (type !== EMPTY && type !== WALL && type !== ROCK) count++;
         }
         readbackBuffer.unmap();
         particleCountElement.textContent = count.toLocaleString();
@@ -789,6 +1249,11 @@ async function init() {
         // Update color params
         device.queue.writeBuffer(colorParamsBuffer, 0, new Float32Array([
             sandColor[0], sandColor[1], sandColor[2], colorByAge ? 1.0 : 0.0
+        ]));
+
+        // Update world params
+        device.queue.writeBuffer(worldParamsBuffer, 0, new Float32Array([
+            gravity, temperature, 0.0, 0.0
         ]));
 
         const encoder = device.createCommandEncoder();

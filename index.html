@@ -159,6 +159,12 @@
         .material-btn.sand { border-color: #e8c547; }
         .material-btn.sand.active { background: #3d3520; }
 
+        .material-btn.water { border-color: #4a9eff; }
+        .material-btn.water.active { background: #203050; border-color: #6ab0ff; color: #6ab0ff; }
+
+        .material-btn.lava { border-color: #ff6b4a; }
+        .material-btn.lava.active { background: #402010; border-color: #ff8b6a; color: #ff8b6a; }
+
         .material-btn.wall { border-color: #7a7a8a; }
         .material-btn.wall.active { background: #2a2a35; border-color: #9a9aaa; color: #9a9aaa; }
 
@@ -232,10 +238,12 @@
     <canvas id="canvas"></canvas>
 
     <div class="controls">
-        <div class="control-group">
+        <div class="control-group wide">
             <label>Material</label>
             <div class="material-buttons">
                 <button class="material-btn sand active" data-material="sand">Sand</button>
+                <button class="material-btn water" data-material="water">Water</button>
+                <button class="material-btn lava" data-material="lava">Lava</button>
                 <button class="material-btn wall" data-material="wall">Wall</button>
                 <button class="material-btn eraser" data-material="eraser">Erase</button>
             </div>
@@ -268,6 +276,16 @@
         </div>
 
         <div class="control-group">
+            <label>Gravity: <span class="value" id="gravityValue">1.0</span></label>
+            <input type="range" id="gravity" min="0.1" max="3" step="0.1" value="1.0">
+        </div>
+
+        <div class="control-group">
+            <label>Temp: <span class="value" id="temperatureValue">20°C</span></label>
+            <input type="range" id="temperature" min="-50" max="1500" step="10" value="20">
+        </div>
+
+        <div class="control-group">
             <label>Actions</label>
             <div class="action-buttons">
                 <button class="action-btn pause" id="pauseBtn">Pause</button>
@@ -282,10 +300,17 @@
     </div>
 
     <div class="keyboard-hints">
-        <kbd>1</kbd> Sand <kbd>2</kbd> Wall <kbd>3</kbd> Eraser <kbd>Space</kbd> Pause <kbd>C</kbd> Clear <kbd>[ ]</kbd> Brush size <kbd>- +</kbd> Fluidity <kbd>A</kbd> Toggle age color
+        <kbd>1</kbd> Sand <kbd>2</kbd> Water <kbd>3</kbd> Lava <kbd>4</kbd> Wall <kbd>5</kbd> Eraser <kbd>Space</kbd> Pause <kbd>C</kbd> Clear<br>
+        <kbd>[ ]</kbd> Brush <kbd>- +</kbd> Fluidity <kbd>g/G</kbd> Gravity <kbd>t/T</kbd> Temperature <kbd>A</kbd> Age color
     </div>
 
     <div id="error"></div>
-    <script type="module" src="main.js"></script>
+    <script>
+        // Cache busting: load main.js with timestamp to force fresh fetch
+        const script = document.createElement('script');
+        script.type = 'module';
+        script.src = 'main.js?v=' + Date.now();
+        document.body.appendChild(script);
+    </script>
 </body>
 </html>

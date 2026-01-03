@@ -39,7 +39,20 @@ async function init() {
         return;
     }
 
-    const device = await adapter.requestDevice();
+    const minStorageTextures = 5;
+    const maxStorageTextures = adapter.limits.maxStorageTexturesPerShaderStage;
+    if (maxStorageTextures < minStorageTextures) {
+        document.getElementById('error').textContent =
+            `GPU supports only ${maxStorageTextures} storage textures per shader stage; need ${minStorageTextures}.`;
+        return;
+    }
+
+    const requiredStorageTextures = Math.min(8, maxStorageTextures);
+    const device = await adapter.requestDevice({
+        requiredLimits: {
+            maxStorageTexturesPerShaderStage: requiredStorageTextures,
+        },
+    });
 
     const canvas = document.getElementById('canvas');
     canvas.width = WIDTH;
@@ -71,8 +84,20 @@ async function init() {
         usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.COPY_DST,
     });
 
+    const waterMassDesc = {
+        size: { width: WIDTH, height: HEIGHT },
+        format: 'r32float',
+        usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
+    };
+
+    const waterMassTextures = [
+        device.createTexture(waterMassDesc),
+        device.createTexture(waterMassDesc),
+    ];
+
     // Buffer to clear spawn texture each frame
     const emptySpawnData = new Uint32Array(WIDTH * HEIGHT);
+    const emptyWaterMassData = new Float32Array(WIDTH * HEIGHT);
 
     const readbackBuffer = device.createBuffer({
         size: WIDTH * HEIGHT * 4,
@@ -101,6 +126,18 @@ async function init() {
             { bytesPerRow: WIDTH * 4 },
             { width: WIDTH, height: HEIGHT }
         );
+        device.queue.writeTexture(
+            { texture: waterMassTextures[0] },
+            emptyWaterMassData,
+            { bytesPerRow: WIDTH * 4 },
+            { width: WIDTH, height: HEIGHT }
+        );
+        device.queue.writeTexture(
+            { texture: waterMassTextures[1] },
+            emptyWaterMassData,
+            { bytesPerRow: WIDTH * 4 },
+            { width: WIDTH, height: HEIGHT }
+        );
     }
 
     clearGrid();
@@ -112,6 +149,8 @@ async function init() {
             @group(0) @binding(2) var<uniform> params: vec4u; // frame, width, height, fluidity (0-100)
             @group(0) @binding(3) var spawnTex: texture_storage_2d<r32uint, read>; // spawn requests
             @group(0) @binding(4) var<uniform> worldParams: vec4f; // gravity, temperature, 0, 0
+            @group(0) @binding(5) var inputWater: texture_storage_2d<r32float, read>;
+            @group(0) @binding(6) var outputWater: texture_storage_2d<r32float, write>;
 
             // Material types
             const EMPTY: u32 = 0u;
@@ -129,6 +168,14 @@ async function init() {
             const AGE_SHIFT: u32 = 8u;
             const COLOR_SHIFT: u32 = 24u;
             const MAX_AGE: u32 = 65535u;
+
+            // Water mass simulation constants
+            const WATER_MAX_MASS: f32 = 1.0;
+            const WATER_MAX_COMPRESS: f32 = 0.02;
+            const WATER_SIDE_FACTOR: f32 = 0.25;
+            const WATER_FLOW_DAMP: f32 = 1.0;
+            const WATER_RENDER_THRESHOLD: f32 = 0.1;
+            const WATER_CONTACT_THRESHOLD: f32 = 0.1;
 
             // Material property functions
             fn getMaterialDensity(mat: u32) -> f32 {
@@ -220,6 +267,121 @@ async function init() {
 
             fn getCell(pos: vec2i) -> u32 {
                 return getType(getRawCell(pos));
+            }
+
+            fn isWaterSpace(cellType: u32) -> bool {
+                return cellType == EMPTY || cellType == WATER;
+            }
+
+            fn getWaterMass(pos: vec2i) -> f32 {
+                return textureLoad(inputWater, pos).r;
+            }
+
+            fn hasWaterAt(pos: vec2i) -> bool {
+                let cellType = getCell(pos);
+                if (cellType == WATER) { return true; }
+                if (cellType != EMPTY) { return false; }
+                return getWaterMass(pos) > WATER_CONTACT_THRESHOLD;
+            }
+
+            fn stableWaterMass(total: f32) -> f32 {
+                if (total <= WATER_MAX_MASS) {
+                    return total;
+                }
+                if (total < WATER_MAX_MASS * 2.0 + WATER_MAX_COMPRESS) {
+                    return (WATER_MAX_MASS * WATER_MAX_MASS + total * WATER_MAX_COMPRESS) / (WATER_MAX_MASS + WATER_MAX_COMPRESS);
+                }
+                return (total + WATER_MAX_COMPRESS) * 0.5;
+            }
+
+            fn clampFlow(flow: f32, srcMass: f32) -> f32 {
+                if (flow > 0.0) {
+                    return min(flow, srcMass);
+                }
+                return -min(-flow, srcMass);
+            }
+
+            fn simulateWaterMass(pos: vec2i) -> f32 {
+                let cellType = getCell(pos);
+                if (!isWaterSpace(cellType)) {
+                    return 0.0;
+                }
+
+                let mass = getWaterMass(pos);
+
+                let belowPos = pos + vec2i(0, 1);
+                let abovePos = pos + vec2i(0, -1);
+                let leftPos = pos + vec2i(-1, 0);
+                let rightPos = pos + vec2i(1, 0);
+
+                let belowType = getCell(belowPos);
+                let aboveType = getCell(abovePos);
+                let leftType = getCell(leftPos);
+                let rightType = getCell(rightPos);
+
+                let canFlowDown = isWaterSpace(belowType);
+                let canFlowUp = isWaterSpace(aboveType);
+                let canFlowLeft = isWaterSpace(leftType);
+                let canFlowRight = isWaterSpace(rightType);
+
+                var massBelow = 0.0;
+                var massAbove = 0.0;
+                var massLeft = 0.0;
+                var massRight = 0.0;
+
+                if (canFlowDown) { massBelow = getWaterMass(belowPos); }
+                if (canFlowUp) { massAbove = getWaterMass(abovePos); }
+                if (canFlowLeft) { massLeft = getWaterMass(leftPos); }
+                if (canFlowRight) { massRight = getWaterMass(rightPos); }
+
+                var flowDown = 0.0;
+                var flowUp = 0.0;
+                var flowLeft = 0.0;
+                var flowRight = 0.0;
+                var sideFactor = WATER_SIDE_FACTOR;
+
+                if (canFlowDown) {
+                    flowDown = stableWaterMass(mass + massBelow) - massBelow;
+                    flowDown = clampFlow(flowDown * WATER_FLOW_DAMP, select(massBelow, mass, flowDown > 0.0));
+                    sideFactor = WATER_SIDE_FACTOR * clamp(massBelow / WATER_MAX_MASS, 0.0, 1.0);
+                }
+                if (canFlowUp) {
+                    flowUp = mass - stableWaterMass(mass + massAbove);
+                    flowUp = clampFlow(flowUp * WATER_FLOW_DAMP, select(massAbove, mass, flowUp > 0.0));
+                }
+                if (canFlowLeft) {
+                    flowLeft = (mass - massLeft) * sideFactor;
+                    flowLeft = clampFlow(flowLeft * WATER_FLOW_DAMP, select(massLeft, mass, flowLeft > 0.0));
+                }
+                if (canFlowRight) {
+                    flowRight = (mass - massRight) * sideFactor;
+                    flowRight = clampFlow(flowRight * WATER_FLOW_DAMP, select(massRight, mass, flowRight > 0.0));
+                }
+
+                let outDown = max(flowDown, 0.0);
+                let outUp = max(flowUp, 0.0);
+                let outLeft = max(flowLeft, 0.0);
+                let outRight = max(flowRight, 0.0);
+                let totalOut = outDown + outUp + outLeft + outRight;
+
+                let inDown = max(-flowDown, 0.0);
+                let inUp = max(-flowUp, 0.0);
+                let inLeft = max(-flowLeft, 0.0);
+                let inRight = max(-flowRight, 0.0);
+                let availableMass = mass + inDown + inUp + inLeft + inRight;
+
+                if (totalOut > availableMass && totalOut > 0.0) {
+                    let scale = availableMass / totalOut;
+                    if (flowDown > 0.0) { flowDown *= scale; }
+                    if (flowUp > 0.0) { flowUp *= scale; }
+                    if (flowLeft > 0.0) { flowLeft *= scale; }
+                    if (flowRight > 0.0) { flowRight *= scale; }
+                }
+
+                var newMass = mass - flowDown - flowUp - flowLeft - flowRight;
+                newMass = clamp(newMass, 0.0, WATER_MAX_MASS + WATER_MAX_COMPRESS);
+
+                return newMass;
             }
 
             fn getSandMovement(pos: vec2i, rng: u32) -> vec2i {
@@ -333,7 +495,7 @@ async function init() {
                 return vec2i(0, 0);
             }
 
-            // Liquid movement - fall, then horizontal leveling, then diagonal
+            // Liquid movement (lava) - fall, then horizontal leveling, then diagonal
             fn getLiquidMovement(pos: vec2i, rng: u32, liquidType: u32, frame: u32) -> vec2i {
                 let gravity = worldParams.x;
                 let gravityRoll = f32(rng % 100u) / 100.0;
@@ -517,8 +679,8 @@ async function init() {
 
                 // Lava + Water = Rock (lava becomes rock)
                 if (current == LAVA) {
-                    if (neighborBelow == WATER || neighborAbove == WATER ||
-                        neighborLeft == WATER || neighborRight == WATER) {
+                    if (hasWaterAt(pos + vec2i(0, 1)) || hasWaterAt(pos + vec2i(0, -1)) ||
+                        hasWaterAt(pos + vec2i(-1, 0)) || hasWaterAt(pos + vec2i(1, 0))) {
                         if (rng % 100u < 50u) { return ROCK; }
                     }
                 }
@@ -625,20 +787,28 @@ async function init() {
                 var resultType = current;
                 var resultAge = currentAge;
                 var resultColorVar = currentColorVar;
+                var waterMassNew = 0.0;
+                var waterMassOut = 0.0;
 
                 // Handle eraser for any material
-                if (spawnRequest == 255u && current != EMPTY) {
+                if (spawnRequest == 255u) {
                     resultType = EMPTY;
                     resultAge = 0u;
                     resultColorVar = 0u;
                     textureStore(outputTex, pos, vec4u(packCell(resultType, resultAge, resultColorVar), 0u, 0u, 0u));
+                    textureStore(outputWater, pos, vec4f(0.0, 0.0, 0.0, 0.0));
                     return;
                 }
 
                 // Immovable solids (WALL only)
                 if (isSolid(current)) {
                     textureStore(outputTex, pos, vec4u(packCell(resultType, resultAge, resultColorVar), 0u, 0u, 0u));
+                    textureStore(outputWater, pos, vec4f(0.0, 0.0, 0.0, 0.0));
                     return;
+                }
+
+                if (current == WATER) {
+                    waterMassNew = WATER_MAX_MASS;
                 }
 
                 // Movable materials (SAND, WATER, LAVA, STEAM, ROCK, ICE)
@@ -649,6 +819,7 @@ async function init() {
                         resultType = interacted;
                         resultAge = 0u;
                         textureStore(outputTex, pos, vec4u(packCell(resultType, resultAge, resultColorVar), 0u, 0u, 0u));
+                        textureStore(outputWater, pos, vec4f(0.0, 0.0, 0.0, 0.0));
                         return;
                     }
 
@@ -658,6 +829,7 @@ async function init() {
                         resultType = tempChanged;
                         resultAge = 0u;
                         textureStore(outputTex, pos, vec4u(packCell(resultType, resultAge, resultColorVar), 0u, 0u, 0u));
+                        textureStore(outputWater, pos, vec4f(0.0, 0.0, 0.0, 0.0));
                         return;
                     }
 
@@ -729,7 +901,14 @@ async function init() {
                     }
                 }
 
+                if (resultType == WATER) {
+                    waterMassOut = WATER_MAX_MASS;
+                } else {
+                    waterMassOut = 0.0;
+                }
+
                 textureStore(outputTex, pos, vec4u(packCell(resultType, resultAge, resultColorVar), 0u, 0u, 0u));
+                textureStore(outputWater, pos, vec4f(waterMassOut, 0.0, 0.0, 0.0));
             }
         `;
 
@@ -752,11 +931,14 @@ async function init() {
     const renderShaderCode = `
             @group(0) @binding(0) var inputTex: texture_2d<u32>;
             @group(0) @binding(1) var<uniform> colorParams: vec4f; // r, g, b, colorByAge
+            @group(0) @binding(2) var waterTex: texture_2d<f32>;
 
             const TYPE_MASK: u32 = 0xFFu;
             const AGE_MASK: u32 = 0xFFFFu;
             const AGE_SHIFT: u32 = 8u;
             const COLOR_SHIFT: u32 = 24u;
+            const WATER_MAX_MASS_R: f32 = 1.0;
+            const WATER_RENDER_THRESHOLD_R: f32 = 0.1;
 
             struct VertexOutput {
                 @builtin(position) pos: vec4f,
@@ -811,6 +993,7 @@ async function init() {
                 let texSize = vec2f(textureDimensions(inputTex));
                 let texCoord = vec2i(in.uv * texSize);
                 let rawCell = textureLoad(inputTex, texCoord, 0).r;
+                let waterMass = textureLoad(waterTex, texCoord, 0).r;
 
                 let cellType = rawCell & TYPE_MASK;
                 let age = (rawCell >> AGE_SHIFT) & AGE_MASK;
@@ -838,12 +1021,6 @@ async function init() {
                 } else if (cellType == WALL_R) {
                     // Wall - gray stone
                     return vec4f(0.45, 0.45, 0.5, 1.0);
-                } else if (cellType == WATER_R) {
-                    // Water - blue, semi-transparent look
-                    let waterBlue = vec3f(0.2, 0.5, 0.9) * brightMult;
-                    // Add slight wave effect based on position and age
-                    let wave = sin(f32(age) * 0.1 + varNorm * 6.28) * 0.05;
-                    return vec4f(clamp(waterBlue + wave, vec3f(0.0), vec3f(1.0)), 1.0);
                 } else if (cellType == STEAM_R) {
                     // Steam - white/gray, translucent effect
                     let steamGray = 0.7 + varNorm * 0.2;
@@ -863,6 +1040,14 @@ async function init() {
                     // Rock - dark gray, solid
                     let rockColor = vec3f(0.3, 0.28, 0.28) * brightMult;
                     return vec4f(rockColor, 1.0);
+                } else if (cellType == WATER_R && waterMass >= WATER_RENDER_THRESHOLD_R) {
+                    // Water - use mass to shape surface
+                    let waterBlue = vec3f(0.2, 0.5, 0.9) * brightMult;
+                    let fill = clamp(waterMass / WATER_MAX_MASS_R, 0.0, 1.0);
+                    let wave = sin(f32(age) * 0.1 + varNorm * 6.28) * 0.05;
+                    let base = vec3f(0.08, 0.08, 0.12);
+                    let waterColor = mix(base, clamp(waterBlue + wave, vec3f(0.0), vec3f(1.0)), max(fill, 0.05));
+                    return vec4f(waterColor, 1.0);
                 }
                 // Empty - dark background
                 return vec4f(0.08, 0.08, 0.12, 1.0);
@@ -925,6 +1110,8 @@ async function init() {
                 { binding: 2, resource: { buffer: paramsBuffer } },
                 { binding: 3, resource: spawnTextureView },
                 { binding: 4, resource: { buffer: worldParamsBuffer } },
+                { binding: 5, resource: waterMassTextures[0].createView() },
+                { binding: 6, resource: waterMassTextures[1].createView() },
             ],
         }),
         device.createBindGroup({
@@ -935,6 +1122,8 @@ async function init() {
                 { binding: 2, resource: { buffer: paramsBuffer } },
                 { binding: 3, resource: spawnTextureView },
                 { binding: 4, resource: { buffer: worldParamsBuffer } },
+                { binding: 5, resource: waterMassTextures[1].createView() },
+                { binding: 6, resource: waterMassTextures[0].createView() },
             ],
         }),
     ];
@@ -946,6 +1135,7 @@ async function init() {
             entries: [
                 { binding: 0, resource: textures[1].createView() },
                 { binding: 1, resource: { buffer: colorParamsBuffer } },
+                { binding: 2, resource: waterMassTextures[1].createView() },
             ],
         }),
         device.createBindGroup({
@@ -953,6 +1143,7 @@ async function init() {
             entries: [
                 { binding: 0, resource: textures[0].createView() },
                 { binding: 1, resource: { buffer: colorParamsBuffer } },
+                { binding: 2, resource: waterMassTextures[0].createView() },
             ],
         }),
     ];

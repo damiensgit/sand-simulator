@@ -135,7 +135,7 @@ export const COLORS = {
 
 export const SIM = {
     // Pressure solver
-    PRESSURE_ITERATIONS: 40,   // More = more accurate, slower
+    PRESSURE_ITERATIONS: 50,   // More = more accurate, slower
     OVERRELAXATION: 1.9,       // Speeds up convergence (1.0-2.0)
 
     // Fluid dynamics
@@ -144,6 +144,9 @@ export const SIM = {
     PARTICLES_PER_CELL: 9,
     PARTICLES_PER_CELL_SIDE: 3,
     FLIP_RATIO: 0.9,
+    VELOCITY_DAMPING: 0.4,
+    SOLID_DAMPING: 0.35,
+    AIR_MIXING: false,
     RENDER_THRESHOLD: 0.5,
     INTERACT_THRESHOLD: 0.05,
     REST_DENSITY: 1.0,
@@ -168,7 +171,7 @@ export const SIM = {
 // =============================================================================
 
 export const DEFAULTS = {
-    simSpeed: 1,
+    simSpeed: 2,
     brushSize: 5,
     selectedMaterial: MATERIAL.WATER,
     isPaused: false,

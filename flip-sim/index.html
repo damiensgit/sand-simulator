@@ -1,0 +1,297 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>FLIP Fluid Simulation</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #0a0a14;
+            color: #eee;
+            min-height: 100vh;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            padding: 15px;
+        }
+
+        h1 {
+            font-size: 1.4rem;
+            margin-bottom: 5px;
+            color: #ff6b35;
+        }
+
+        .subtitle { color: #666; margin-bottom: 15px; font-size: 0.85rem; }
+
+        #error {
+            color: #ff6b6b;
+            background: rgba(255,107,107,0.1);
+            padding: 10px 20px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            display: none;
+        }
+
+        .main-container {
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            justify-content: center;
+        }
+
+        #canvas {
+            border: 2px solid #222;
+            border-radius: 8px;
+            cursor: crosshair;
+            image-rendering: pixelated;
+        }
+
+        .controls {
+            background: #12121a;
+            padding: 15px;
+            border-radius: 8px;
+            min-width: 200px;
+            max-width: 220px;
+        }
+
+        .control-section {
+            margin-bottom: 15px;
+            padding-bottom: 15px;
+            border-bottom: 1px solid #222;
+        }
+
+        .control-section:last-child { border-bottom: none; margin-bottom: 0; }
+
+        .control-section h3 {
+            font-size: 0.75rem;
+            color: #ff6b35;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .material-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 6px;
+        }
+
+        .material-btn {
+            padding: 8px 4px;
+            border: 2px solid transparent;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            font-weight: 500;
+            transition: all 0.15s;
+        }
+
+        .material-btn:hover { transform: scale(1.03); }
+        .material-btn.selected { border-color: #fff; }
+
+        .material-btn[data-material="sand"] { background: #e6c86e; color: #333; }
+        .material-btn[data-material="water"] { background: #4a8fe7; color: #fff; }
+        .material-btn[data-material="lava"] { background: #ff4500; color: #fff; }
+        .material-btn[data-material="steam"] { background: #c8c8d0; color: #333; }
+        .material-btn[data-material="wall"] { background: #555; color: #fff; }
+        .material-btn[data-material="eraser"] { background: #222; color: #888; border: 1px dashed #444; }
+
+        .slider-group { margin-bottom: 10px; }
+
+        .slider-label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 0.7rem;
+            margin-bottom: 3px;
+        }
+
+        .slider-label span:last-child { color: #ff6b35; font-weight: 600; }
+
+        input[type="range"] {
+            width: 100%;
+            height: 5px;
+            -webkit-appearance: none;
+            background: #222;
+            border-radius: 3px;
+            outline: none;
+        }
+
+        input[type="range"]::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 14px;
+            height: 14px;
+            background: #ff6b35;
+            border-radius: 50%;
+            cursor: pointer;
+        }
+
+        .btn {
+            width: 100%;
+            padding: 8px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 0.8rem;
+            font-weight: 500;
+            margin-bottom: 6px;
+            transition: all 0.15s;
+        }
+
+        .btn:hover { opacity: 0.9; }
+        .btn-clear { background: #e74c3c; color: #fff; }
+        .btn-pause { background: #f39c12; color: #333; }
+        .btn-explode { background: #9b59b6; color: #fff; }
+
+        .toggle-group { margin-bottom: 8px; }
+
+        .toggle-label {
+            display: flex;
+            align-items: center;
+            font-size: 0.7rem;
+            cursor: pointer;
+        }
+
+        .toggle-label input {
+            margin-right: 6px;
+            accent-color: #ff6b35;
+        }
+
+        .stats {
+            font-size: 0.7rem;
+            color: #555;
+            font-family: monospace;
+        }
+
+        .stats div { margin-bottom: 2px; }
+
+        .key-hint {
+            font-size: 0.65rem;
+            color: #444;
+            margin-top: 10px;
+            line-height: 1.5;
+        }
+
+        .key-hint kbd {
+            background: #222;
+            padding: 1px 4px;
+            border-radius: 2px;
+            margin-right: 3px;
+        }
+    </style>
+</head>
+<body>
+    <h1>FLIP Fluid Simulation</h1>
+    <p class="subtitle">Pressure-based fluids with temperature and viscosity</p>
+
+    <div id="error"></div>
+
+    <div class="main-container">
+        <canvas id="canvas"></canvas>
+
+        <div class="controls">
+            <div class="control-section">
+                <h3>Materials</h3>
+                <div class="material-grid">
+                    <button class="material-btn" data-material="sand">Sand</button>
+                    <button class="material-btn selected" data-material="water">Water</button>
+                    <button class="material-btn" data-material="lava">Lava</button>
+                    <button class="material-btn" data-material="steam">Steam</button>
+                    <button class="material-btn" data-material="wall">Wall</button>
+                    <button class="material-btn" data-material="eraser">Eraser</button>
+                </div>
+            </div>
+
+            <div class="control-section">
+                <h3>Brush</h3>
+                <div class="slider-group">
+                    <div class="slider-label">
+                        <span>Size</span>
+                        <span id="brushValue">5</span>
+                    </div>
+                    <input type="range" id="brushSize" min="1" max="20" value="5">
+                </div>
+            </div>
+
+            <div class="control-section">
+                <h3>Physics</h3>
+                <div class="slider-group">
+                    <div class="slider-label">
+                        <span>Sim Speed</span>
+                        <span id="speedValue">1</span>
+                    </div>
+                    <input type="range" id="simSpeed" min="1" max="8" value="1">
+                </div>
+                <div class="slider-group">
+                    <div class="slider-label">
+                        <span>Gravity</span>
+                        <span id="gravityValue">9.8</span>
+                    </div>
+                    <input type="range" id="gravity" min="0" max="30" step="0.5" value="9.8">
+                </div>
+                <div class="slider-group">
+                    <div class="slider-label">
+                        <span>Viscosity Scale</span>
+                        <span id="viscosityValue">1.0</span>
+                    </div>
+                    <input type="range" id="viscosity" min="0.1" max="3" step="0.1" value="1.0">
+                </div>
+                <div class="slider-group">
+                    <div class="slider-label">
+                        <span>Sand Fluidity</span>
+                        <span id="fluidityValue">50</span>
+                    </div>
+                    <input type="range" id="fluidity" min="0" max="100" value="50">
+                </div>
+            </div>
+
+            <div class="control-section">
+                <h3>Display</h3>
+                <div class="toggle-group">
+                    <label class="toggle-label">
+                        <input type="checkbox" id="showPressure"> Show Pressure
+                    </label>
+                </div>
+                <div class="toggle-group">
+                    <label class="toggle-label">
+                        <input type="checkbox" id="showVelocity"> Show Velocity
+                    </label>
+                </div>
+            </div>
+
+            <div class="control-section">
+                <button class="btn btn-pause" id="pauseBtn">Pause</button>
+                <button class="btn btn-explode" id="explodeBtn">Explosion Mode</button>
+                <button class="btn btn-clear" id="clearBtn">Clear All</button>
+            </div>
+
+            <div class="stats">
+                <div>FPS: <span id="fps">0</span></div>
+                <div>Sand: <span id="sandCount">0</span></div>
+                <div>Water: <span id="waterCount">0</span></div>
+                <div>Lava: <span id="lavaCount">0</span></div>
+                <div>Steam: <span id="steamCount">0</span></div>
+            </div>
+
+            <div class="key-hint">
+                <kbd>1-6</kbd> Materials<br>
+                <kbd>Space</kbd> Pause<br>
+                <kbd>E</kbd> Explosion<br>
+                <kbd>C</kbd> Clear<br>
+                <kbd>[ ]</kbd> Brush size
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Cache busting - force reload of modules
+        const version = Date.now();
+        const script = document.createElement('script');
+        script.type = 'module';
+        script.src = `main.js?v=${version}`;
+        document.body.appendChild(script);
+    </script>
+</body>
+</html>

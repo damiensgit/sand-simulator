@@ -15,16 +15,53 @@
             display: flex;
             flex-direction: column;
             align-items: center;
-            padding: 15px;
+            padding: 20px;
+        }
+
+        /* Header */
+        .header {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            margin-bottom: 15px;
+        }
+
+        .header-title {
+            text-align: center;
         }
 
         h1 {
-            font-size: 1.4rem;
-            margin-bottom: 5px;
+            font-size: 1.3rem;
             color: #ff6b35;
+            margin-bottom: 2px;
         }
 
-        .subtitle { color: #666; margin-bottom: 15px; font-size: 0.85rem; }
+        .subtitle { color: #555; font-size: 0.75rem; }
+
+        .header-actions {
+            display: flex;
+            gap: 8px;
+        }
+
+        .action-btn {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 0.75rem;
+            font-weight: 600;
+            transition: all 0.15s;
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        .action-btn:hover { transform: scale(1.02); opacity: 0.9; }
+        .btn-pause { background: #f39c12; color: #111; }
+        .btn-pause.paused { background: #2ecc71; }
+        .btn-explode { background: #9b59b6; color: #fff; }
+        .btn-explode.active { background: #e74c3c; }
+        .btn-clear { background: #e74c3c; color: #fff; }
 
         #error {
             color: #ff6b6b;
@@ -35,165 +72,253 @@
             display: none;
         }
 
+        /* Main Layout */
         .main-container {
-            display: flex;
-            gap: 15px;
-            flex-wrap: wrap;
-            justify-content: center;
+            display: grid;
+            grid-template-columns: auto 1fr auto;
+            grid-template-rows: 1fr auto;
+            gap: 12px;
+            max-width: 1200px;
+        }
+
+        /* Canvas Area */
+        .canvas-wrapper {
+            grid-column: 2;
+            grid-row: 1;
         }
 
         #canvas {
-            border: 2px solid #222;
+            width: 512px;
+            height: 512px;
+            border: 2px solid #1a1a24;
             border-radius: 8px;
             cursor: crosshair;
             image-rendering: pixelated;
+            display: block;
         }
 
-        .controls {
-            background: #12121a;
-            padding: 15px;
+        /* Stats Bar */
+        .stats-bar {
+            width: 512px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 0;
+            font-size: 0.6rem;
+            font-family: 'SF Mono', 'Consolas', monospace;
+            margin-top: 6px;
+        }
+
+        .stats-left {
+            display: flex;
+            gap: 12px;
+        }
+
+        .stat-item {
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+
+        .stat-item .label { color: #555; }
+        .stat-item .value { color: #ff6b35; font-weight: 600; }
+        .stat-item.fps .value { color: #2ecc71; }
+
+        .stats-right {
+            display: flex;
+            gap: 10px;
+            font-size: 0.55rem;
+        }
+
+        .key-hint { color: #444; }
+        .key-hint kbd {
+            background: #1a1a24;
+            padding: 2px 4px;
+            border-radius: 2px;
+            margin-right: 2px;
+        }
+
+        /* Side Panels */
+        .panel {
+            background: #111118;
+            padding: 12px;
             border-radius: 8px;
-            min-width: 200px;
-            max-width: 220px;
+            border: 1px solid #1a1a24;
         }
 
-        .control-section {
-            margin-bottom: 15px;
-            padding-bottom: 15px;
-            border-bottom: 1px solid #222;
+        .panel-left {
+            grid-column: 1;
+            grid-row: 1;
+            width: 140px;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
         }
 
-        .control-section:last-child { border-bottom: none; margin-bottom: 0; }
+        .panel-right {
+            grid-column: 3;
+            grid-row: 1;
+            width: 180px;
+            max-height: 520px;
+            overflow-y: auto;
+            scrollbar-width: thin;
+            scrollbar-color: #333 #111118;
+        }
 
-        .control-section h3 {
-            font-size: 0.75rem;
+        .panel-right::-webkit-scrollbar { width: 4px; }
+        .panel-right::-webkit-scrollbar-track { background: #111118; }
+        .panel-right::-webkit-scrollbar-thumb { background: #333; border-radius: 2px; }
+
+        .section-title {
+            font-size: 0.65rem;
             color: #ff6b35;
-            margin-bottom: 8px;
             text-transform: uppercase;
             letter-spacing: 1px;
+            margin-bottom: 8px;
+            font-weight: 600;
         }
 
+        /* Materials */
         .material-grid {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 6px;
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
         }
 
         .material-btn {
-            padding: 8px 4px;
+            padding: 8px 10px;
             border: 2px solid transparent;
             border-radius: 5px;
             cursor: pointer;
-            font-size: 0.75rem;
-            font-weight: 500;
+            font-size: 0.7rem;
+            font-weight: 600;
+            transition: all 0.15s;
+            text-align: left;
+        }
+
+        .material-btn:hover { transform: scale(1.02); }
+        .material-btn.selected { border-color: #fff; box-shadow: 0 0 8px rgba(255,255,255,0.2); }
+
+        .material-btn[data-material="sand"] { background: linear-gradient(135deg, #e6c86e, #d4b85a); color: #333; }
+        .material-btn[data-material="water"] { background: linear-gradient(135deg, #4a8fe7, #3a7fd7); color: #fff; }
+        .material-btn[data-material="lava"] { background: linear-gradient(135deg, #ff4500, #cc3700); color: #fff; }
+        .material-btn[data-material="steam"] { background: linear-gradient(135deg, #c8c8d0, #b0b0b8); color: #333; }
+        .material-btn[data-material="wall"] { background: linear-gradient(135deg, #555, #444); color: #fff; }
+        .material-btn[data-material="eraser"] { background: #1a1a24; color: #666; border: 1px dashed #333; }
+        .material-btn[data-tool="ball"] { background: linear-gradient(135deg, #2bb4a0, #229988); color: #fff; }
+
+        /* Brush Size */
+        .brush-section {
+            padding-top: 8px;
+            border-top: 1px solid #1a1a24;
+        }
+
+        /* Display Options */
+        .display-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 4px;
+            margin-bottom: 10px;
+        }
+
+        .option-btn {
+            padding: 6px 4px;
+            border: 2px solid transparent;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 0.65rem;
+            font-weight: 600;
+            background: #1a1a24;
+            color: #666;
             transition: all 0.15s;
         }
 
-        .material-btn:hover { transform: scale(1.03); }
-        .material-btn.selected { border-color: #fff; }
+        .option-btn:hover { background: #222230; }
+        .option-btn.selected { border-color: #ff6b35; color: #fff; background: #222230; }
 
-        .material-btn[data-material="sand"] { background: #e6c86e; color: #333; }
-        .material-btn[data-material="water"] { background: #4a8fe7; color: #fff; }
-        .material-btn[data-material="lava"] { background: #ff4500; color: #fff; }
-        .material-btn[data-material="steam"] { background: #c8c8d0; color: #333; }
-        .material-btn[data-material="wall"] { background: #555; color: #fff; }
-        .material-btn[data-material="eraser"] { background: #222; color: #888; border: 1px dashed #444; }
+        /* Sliders */
+        .slider-section {
+            margin-bottom: 12px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #1a1a24;
+        }
 
-        .slider-group { margin-bottom: 10px; }
+        .slider-section:last-child { border-bottom: none; margin-bottom: 0; padding-bottom: 0; }
+
+        .slider-group { margin-bottom: 8px; }
+        .slider-group:last-child { margin-bottom: 0; }
 
         .slider-label {
             display: flex;
             justify-content: space-between;
-            font-size: 0.7rem;
+            font-size: 0.65rem;
             margin-bottom: 3px;
+            color: #888;
         }
 
         .slider-label span:last-child { color: #ff6b35; font-weight: 600; }
 
         input[type="range"] {
             width: 100%;
-            height: 5px;
+            height: 4px;
             -webkit-appearance: none;
-            background: #222;
-            border-radius: 3px;
+            background: #1a1a24;
+            border-radius: 2px;
             outline: none;
         }
 
         input[type="range"]::-webkit-slider-thumb {
             -webkit-appearance: none;
-            width: 14px;
-            height: 14px;
+            width: 12px;
+            height: 12px;
             background: #ff6b35;
             border-radius: 50%;
             cursor: pointer;
+            transition: transform 0.1s;
         }
 
-        .btn {
-            width: 100%;
-            padding: 8px;
-            border: none;
-            border-radius: 5px;
-            cursor: pointer;
-            font-size: 0.8rem;
-            font-weight: 500;
-            margin-bottom: 6px;
-            transition: all 0.15s;
+        input[type="range"]::-webkit-slider-thumb:hover {
+            transform: scale(1.2);
         }
 
-        .btn:hover { opacity: 0.9; }
-        .btn-clear { background: #e74c3c; color: #fff; }
-        .btn-pause { background: #f39c12; color: #333; }
-        .btn-explode { background: #9b59b6; color: #fff; }
-
-        .toggle-group { margin-bottom: 8px; }
+        /* Toggle */
+        .toggle-group { margin-top: 8px; }
 
         .toggle-label {
             display: flex;
             align-items: center;
-            font-size: 0.7rem;
+            font-size: 0.65rem;
             cursor: pointer;
+            color: #888;
         }
 
         .toggle-label input {
             margin-right: 6px;
             accent-color: #ff6b35;
         }
-
-        .stats {
-            font-size: 0.7rem;
-            color: #555;
-            font-family: monospace;
-        }
-
-        .stats div { margin-bottom: 2px; }
-
-        .key-hint {
-            font-size: 0.65rem;
-            color: #444;
-            margin-top: 10px;
-            line-height: 1.5;
-        }
-
-        .key-hint kbd {
-            background: #222;
-            padding: 1px 4px;
-            border-radius: 2px;
-            margin-right: 3px;
-        }
     </style>
 </head>
 <body>
-    <h1>FLIP Fluid Simulation</h1>
-    <p class="subtitle">Pressure-based fluids with temperature and viscosity</p>
+    <!-- Header with title and action buttons -->
+    <div class="header">
+        <div class="header-title">
+            <h1>FLIP Fluid Simulation</h1>
+            <p class="subtitle">Pressure-based fluids with temperature</p>
+        </div>
+        <div class="header-actions">
+            <button class="action-btn btn-pause" id="pauseBtn">Pause</button>
+            <button class="action-btn btn-explode" id="explodeBtn">Explode</button>
+            <button class="action-btn btn-clear" id="clearBtn">Clear</button>
+        </div>
+    </div>
 
     <div id="error"></div>
 
     <div class="main-container">
-        <canvas id="canvas"></canvas>
-
-        <div class="controls">
-            <div class="control-section">
-                <h3>Materials</h3>
+        <!-- Left Panel: Materials & Brush -->
+        <div class="panel panel-left">
+            <div>
+                <div class="section-title">Materials</div>
                 <div class="material-grid">
                     <button class="material-btn" data-material="sand">Sand</button>
                     <button class="material-btn selected" data-material="water">Water</button>
@@ -201,11 +326,11 @@
                     <button class="material-btn" data-material="steam">Steam</button>
                     <button class="material-btn" data-material="wall">Wall</button>
                     <button class="material-btn" data-material="eraser">Eraser</button>
+                    <button class="material-btn" data-tool="ball">Ball</button>
                 </div>
             </div>
-
-            <div class="control-section">
-                <h3>Brush</h3>
+            <div class="brush-section">
+                <div class="section-title">Brush</div>
                 <div class="slider-group">
                     <div class="slider-label">
                         <span>Size</span>
@@ -214,15 +339,68 @@
                     <input type="range" id="brushSize" min="1" max="20" value="5">
                 </div>
             </div>
+            <div class="brush-section">
+                <div class="section-title">Display</div>
+                <div class="display-grid">
+                    <button class="option-btn selected" data-display="none">Normal</button>
+                    <button class="option-btn" data-display="pressure">Pressure</button>
+                    <button class="option-btn" data-display="velocity">Velocity</button>
+                    <button class="option-btn" data-display="marching">Marching</button>
+                </div>
+                <div class="toggle-group">
+                    <label class="toggle-label">
+                        <input type="checkbox" id="airMixing"> Oil Mode
+                    </label>
+                </div>
+            </div>
+        </div>
 
-            <div class="control-section">
-                <h3>Physics</h3>
+        <!-- Canvas -->
+        <div class="canvas-wrapper">
+            <canvas id="canvas"></canvas>
+            <div class="stats-bar">
+                <div class="stats-left">
+                    <div class="stat-item fps">
+                        <span class="label">FPS</span>
+                        <span class="value" id="fps">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="label">Sand</span>
+                        <span class="value" id="sandCount">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="label">Water</span>
+                        <span class="value" id="waterCount">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="label">Lava</span>
+                        <span class="value" id="lavaCount">0</span>
+                    </div>
+                    <div class="stat-item">
+                        <span class="label">Steam</span>
+                        <span class="value" id="steamCount">0</span>
+                    </div>
+                </div>
+                <div class="stats-right">
+                    <span class="key-hint"><kbd>1-6</kbd>Mat</span>
+                    <span class="key-hint"><kbd>Space</kbd>Pause</span>
+                    <span class="key-hint"><kbd>E</kbd>Explode</span>
+                    <span class="key-hint"><kbd>C</kbd>Clear</span>
+                    <span class="key-hint"><kbd>[]</kbd>Brush</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Panel: Physics Controls -->
+        <div class="panel panel-right">
+            <div class="slider-section">
+                <div class="section-title">Simulation</div>
                 <div class="slider-group">
                     <div class="slider-label">
-                        <span>Sim Speed</span>
-                    <span id="speedValue">2</span>
-                </div>
-                <input type="range" id="simSpeed" min="1" max="8" value="2">
+                        <span>Speed</span>
+                        <span id="speedValue">2</span>
+                    </div>
+                    <input type="range" id="simSpeed" min="1" max="12" value="3">
                 </div>
                 <div class="slider-group">
                     <div class="slider-label">
@@ -231,19 +409,66 @@
                     </div>
                     <input type="range" id="gravity" min="0" max="30" step="0.5" value="9.8">
                 </div>
+            </div>
+
+            <div class="slider-section">
+                <div class="section-title">Fluid</div>
                 <div class="slider-group">
                     <div class="slider-label">
-                        <span>Viscosity Scale</span>
+                        <span>Viscosity</span>
                         <span id="viscosityValue">1.0</span>
                     </div>
-                    <input type="range" id="viscosity" min="0.1" max="3" step="0.1" value="1.0">
+                    <input type="range" id="viscosity" min="0" max="3" step="0.05" value="1.0">
                 </div>
                 <div class="slider-group">
                     <div class="slider-label">
-                        <span>Velocity Damping</span>
+                        <span>FLIP Ratio</span>
+                        <span id="flipValue">0.95</span>
+                    </div>
+                    <input type="range" id="flipRatio" min="0" max="1" step="0.01" value="0.95">
+                </div>
+                <div class="slider-group">
+                    <div class="slider-label">
+                        <span>Vorticity</span>
+                        <span id="vorticityValue">1.50</span>
+                    </div>
+                    <input type="range" id="vorticity" min="0" max="5" step="0.1" value="1.5">
+                </div>
+            </div>
+
+            <div class="slider-section">
+                <div class="section-title">Damping</div>
+                <div class="slider-group">
+                    <div class="slider-label">
+                        <span>Particle</span>
                         <span id="dampingValue">0.4</span>
                     </div>
                     <input type="range" id="damping" min="0" max="1" step="0.05" value="0.4">
+                </div>
+                <div class="slider-group">
+                    <div class="slider-label">
+                        <span>Grid</span>
+                        <span id="gridDampingValue">0.4</span>
+                    </div>
+                    <input type="range" id="gridDamping" min="0" max="1" step="0.05" value="0.4">
+                </div>
+            </div>
+
+            <div class="slider-section">
+                <div class="section-title">Particles</div>
+                <div class="slider-group">
+                    <div class="slider-label">
+                        <span>Sep. Strength</span>
+                        <span id="separationStrengthValue">0.2</span>
+                    </div>
+                    <input type="range" id="separationStrength" min="0" max="1" step="0.05" value="0.2">
+                </div>
+                <div class="slider-group">
+                    <div class="slider-label">
+                        <span>Sep. Iters</span>
+                        <span id="separationItersValue">1</span>
+                    </div>
+                    <input type="range" id="separationIters" min="0" max="4" step="1" value="1">
                 </div>
                 <div class="slider-group">
                     <div class="slider-label">
@@ -252,47 +477,13 @@
                     </div>
                     <input type="range" id="fluidity" min="0" max="100" value="50">
                 </div>
-            </div>
-
-            <div class="control-section">
-                <h3>Display</h3>
-                <div class="toggle-group">
-                    <label class="toggle-label">
-                        <input type="checkbox" id="showPressure"> Show Pressure
-                    </label>
+                <div class="slider-group">
+                    <div class="slider-label">
+                        <span>Ball Radius</span>
+                        <span id="ballRadiusValue">12</span>
+                    </div>
+                    <input type="range" id="ballRadius" min="2" max="40" step="1" value="12">
                 </div>
-                <div class="toggle-group">
-                    <label class="toggle-label">
-                        <input type="checkbox" id="showVelocity"> Show Velocity
-                    </label>
-                </div>
-                <div class="toggle-group">
-                    <label class="toggle-label">
-                        <input type="checkbox" id="airMixing"> Mix With Air (Oil Mode)
-                    </label>
-                </div>
-            </div>
-
-            <div class="control-section">
-                <button class="btn btn-pause" id="pauseBtn">Pause</button>
-                <button class="btn btn-explode" id="explodeBtn">Explosion Mode</button>
-                <button class="btn btn-clear" id="clearBtn">Clear All</button>
-            </div>
-
-            <div class="stats">
-                <div>FPS: <span id="fps">0</span></div>
-                <div>Sand: <span id="sandCount">0</span></div>
-                <div>Water: <span id="waterCount">0</span></div>
-                <div>Lava: <span id="lavaCount">0</span></div>
-                <div>Steam: <span id="steamCount">0</span></div>
-            </div>
-
-            <div class="key-hint">
-                <kbd>1-6</kbd> Materials<br>
-                <kbd>Space</kbd> Pause<br>
-                <kbd>E</kbd> Explosion<br>
-                <kbd>C</kbd> Clear<br>
-                <kbd>[ ]</kbd> Brush size
             </div>
         </div>
     </div>

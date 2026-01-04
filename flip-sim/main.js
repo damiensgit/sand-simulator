@@ -15,11 +15,18 @@ import {
     sandStepShader,
     evictParticlesShader,
     clearGridShader,
+    buildMarkerShader,
+    reseedParticlesShader,
     depositParticlesShader,
     normalizeGridShader,
     maskSolidVelShader,
+    vorticityShader,
+    applyVorticityShader,
+    ballForceShader,
+    dampVelocityShader,
     pressureShader,
     applyPressureShader,
+    extrapolateVelocityShader,
     transferParticlesShader,
     renderShader,
 } from './shaders.js';
@@ -43,11 +50,19 @@ const MATERIAL_BY_NAME = {
 const state = {
     paused: DEFAULTS.isPaused,
     gravity: SIM.GRAVITY,
-    viscosityScale: 0.2,
+    viscosityScale: 0.03,
     velocityDamping: SIM.VELOCITY_DAMPING,
+    gridDamping: SIM.GRID_DAMPING,
+    flipRatio: SIM.FLIP_RATIO,
+    separationStrength: SIM.SEPARATION_STRENGTH,
+    separationIters: SIM.SEPARATION_ITERS,
+    vorticityStrength: SIM.VORTICITY_STRENGTH,
+    ballEnabled: false,
+    ballRadius: 12,
     simSpeed: DEFAULTS.simSpeed,
     brushSize: DEFAULTS.brushSize,
     selectedMaterial: DEFAULTS.selectedMaterial,
+    selectedMaterialName: 'water',
     fluidity: 50,
     displayMode: 0,
     airMixing: SIM.AIR_MIXING,
@@ -55,6 +70,14 @@ const state = {
     frame: 0,
     lastFpsTime: 0,
     fpsFrameCount: 0,
+};
+
+const ballState = {
+    pos: { x: -100, y: -100 },
+    vel: { x: 0, y: 0 },
+    dragging: false,
+    lastTime: 0,
+    lastPos: { x: -100, y: -100 },
 };
 
 function showError(message) {
@@ -122,6 +145,7 @@ async function init() {
     const velVTex = [createTexture('r32float', WIDTH, velVHeight), createTexture('r32float', WIDTH, velVHeight)];
     const velUPrevTex = createTexture('r32float', velUWidth, HEIGHT);
     const velVPrevTex = createTexture('r32float', WIDTH, velVHeight);
+    const vorticityTex = createTexture('r32float', WIDTH, HEIGHT);
 
     const spawnTex = device.createTexture({
         size: { width: WIDTH, height: HEIGHT },
@@ -136,6 +160,11 @@ async function init() {
     });
 
     const paramsBuffer = device.createBuffer({
+        size: 64,
+        usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+    });
+
+    const ballBuffer = device.createBuffer({
         size: 32,
         usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     });
@@ -186,6 +215,11 @@ async function init() {
     });
 
     const densitySumBuffer = device.createBuffer({
+        size: WIDTH * HEIGHT * 4,
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+    });
+
+    const markerBuffer = device.createBuffer({
         size: WIDTH * HEIGHT * 4,
         usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
     });
@@ -365,6 +399,14 @@ async function init() {
         layout: 'auto',
         compute: { module: device.createShaderModule({ code: clearGridShader }), entryPoint: 'main' },
     });
+    const buildMarkerPipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module: device.createShaderModule({ code: buildMarkerShader }), entryPoint: 'main' },
+    });
+    const reseedPipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module: device.createShaderModule({ code: reseedParticlesShader }), entryPoint: 'main' },
+    });
     const depositPipeline = device.createComputePipeline({
         layout: 'auto',
         compute: { module: device.createShaderModule({ code: depositParticlesShader }), entryPoint: 'main' },
@@ -377,6 +419,22 @@ async function init() {
         layout: 'auto',
         compute: { module: device.createShaderModule({ code: maskSolidVelShader }), entryPoint: 'main' },
     });
+    const vorticityPipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module: device.createShaderModule({ code: vorticityShader }), entryPoint: 'main' },
+    });
+    const applyVorticityPipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module: device.createShaderModule({ code: applyVorticityShader }), entryPoint: 'main' },
+    });
+    const ballForcePipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module: device.createShaderModule({ code: ballForceShader }), entryPoint: 'main' },
+    });
+    const dampVelocityPipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module: device.createShaderModule({ code: dampVelocityShader }), entryPoint: 'main' },
+    });
     const pressurePipeline = device.createComputePipeline({
         layout: 'auto',
         compute: { module: device.createShaderModule({ code: pressureShader }), entryPoint: 'main' },
@@ -384,6 +442,10 @@ async function init() {
     const applyPressurePipeline = device.createComputePipeline({
         layout: 'auto',
         compute: { module: device.createShaderModule({ code: applyPressureShader }), entryPoint: 'main' },
+    });
+    const extrapolatePipeline = device.createComputePipeline({
+        layout: 'auto',
+        compute: { module: device.createShaderModule({ code: extrapolateVelocityShader }), entryPoint: 'main' },
     });
     const transferPipeline = device.createComputePipeline({
         layout: 'auto',
@@ -440,6 +502,7 @@ async function init() {
                 { binding: 2, resource: { buffer: particlePosBuffer } },
                 { binding: 3, resource: { buffer: particleVelBuffer } },
                 { binding: 4, resource: { buffer: particleMassBuffer } },
+                { binding: 5, resource: densityTex.createView() },
             ],
         }),
         device.createBindGroup({
@@ -450,6 +513,7 @@ async function init() {
                 { binding: 2, resource: { buffer: particlePosBuffer } },
                 { binding: 3, resource: { buffer: particleVelBuffer } },
                 { binding: 4, resource: { buffer: particleMassBuffer } },
+                { binding: 5, resource: densityTex.createView() },
             ],
         }),
     ];
@@ -496,6 +560,7 @@ async function init() {
                 { binding: 2, resource: { buffer: cellParticlesBuffer } },
                 { binding: 3, resource: { buffer: particlePosBuffer } },
                 { binding: 4, resource: { buffer: particleMassBuffer } },
+                { binding: 5, resource: { buffer: paramsBuffer } },
             ],
         }),
         device.createBindGroup({
@@ -506,6 +571,7 @@ async function init() {
                 { binding: 2, resource: { buffer: cellParticlesBuffer } },
                 { binding: 3, resource: { buffer: particlePosBuffer } },
                 { binding: 4, resource: { buffer: particleMassBuffer } },
+                { binding: 5, resource: { buffer: paramsBuffer } },
             ],
         }),
     ];
@@ -519,6 +585,8 @@ async function init() {
                 { binding: 1, resource: { buffer: particlePosBuffer } },
                 { binding: 2, resource: { buffer: particleVelBuffer } },
                 { binding: 3, resource: { buffer: particleMassBuffer } },
+                { binding: 4, resource: solidVelXTex[0].createView() },
+                { binding: 5, resource: solidVelYTex[0].createView() },
             ],
         }),
         device.createBindGroup({
@@ -528,6 +596,8 @@ async function init() {
                 { binding: 1, resource: { buffer: particlePosBuffer } },
                 { binding: 2, resource: { buffer: particleVelBuffer } },
                 { binding: 3, resource: { buffer: particleMassBuffer } },
+                { binding: 4, resource: solidVelXTex[1].createView() },
+                { binding: 5, resource: solidVelYTex[1].createView() },
             ],
         }),
     ];
@@ -573,6 +643,40 @@ async function init() {
         ],
     });
 
+    const markerGroups = [
+        device.createBindGroup({
+            layout: buildMarkerPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: materialTex[0].createView() },
+                { binding: 1, resource: densityTex.createView() },
+                { binding: 2, resource: { buffer: cellCountsBuffer } },
+                { binding: 3, resource: { buffer: markerBuffer } },
+            ],
+        }),
+        device.createBindGroup({
+            layout: buildMarkerPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: materialTex[1].createView() },
+                { binding: 1, resource: densityTex.createView() },
+                { binding: 2, resource: { buffer: cellCountsBuffer } },
+                { binding: 3, resource: { buffer: markerBuffer } },
+            ],
+        }),
+    ];
+
+    const reseedGroup = device.createBindGroup({
+        layout: reseedPipeline.getBindGroupLayout(0),
+        entries: [
+            { binding: 0, resource: { buffer: cellCountsBuffer } },
+            { binding: 1, resource: { buffer: cellParticlesBuffer } },
+            { binding: 2, resource: { buffer: particlePosBuffer } },
+            { binding: 3, resource: { buffer: particleVelBuffer } },
+            { binding: 4, resource: velUTex[0].createView() },
+            { binding: 5, resource: velVTex[0].createView() },
+            { binding: 6, resource: { buffer: markerBuffer } },
+        ],
+    });
+
     const maskVelGroups = Array.from({ length: 2 }, () => Array(2));
     for (let mi = 0; mi < 2; mi++) {
         for (let vi = 0; vi < 2; vi++) {
@@ -589,8 +693,54 @@ async function init() {
         }
     }
 
+    const vorticityGroups = Array.from({ length: 2 }, (_, vi) => (
+        device.createBindGroup({
+            layout: vorticityPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: velUTex[vi].createView() },
+                { binding: 1, resource: velVTex[vi].createView() },
+                { binding: 2, resource: vorticityTex.createView() },
+            ],
+        })
+    ));
+
+    const applyVorticityGroups = Array.from({ length: 2 }, (_, vi) => (
+        device.createBindGroup({
+            layout: applyVorticityPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: paramsBuffer } },
+                { binding: 1, resource: vorticityTex.createView() },
+                { binding: 2, resource: velUTex[vi].createView() },
+                { binding: 3, resource: velVTex[vi].createView() },
+            ],
+        })
+    ));
+
+    const ballForceGroups = Array.from({ length: 2 }, (_, vi) => (
+        device.createBindGroup({
+            layout: ballForcePipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: ballBuffer } },
+                { binding: 1, resource: velUTex[vi].createView() },
+                { binding: 2, resource: velVTex[vi].createView() },
+            ],
+        })
+    ));
+
+    const dampVelGroups = Array.from({ length: 2 }, (_, vi) => (
+        device.createBindGroup({
+            layout: dampVelocityPipeline.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: paramsBuffer } },
+                { binding: 1, resource: velUTex[vi].createView() },
+                { binding: 2, resource: velVTex[vi].createView() },
+            ],
+        })
+    ));
+
     const pressureGroups = Array.from({ length: 2 }, () => Array.from({ length: 2 }, () => Array(2)));
     const applyGroups = Array.from({ length: 2 }, () => Array.from({ length: 2 }, () => Array(2)));
+    const extrapolateGroups = Array.from({ length: 2 }, () => Array.from({ length: 2 }, () => Array(2)));
     const renderGroups = Array.from({ length: 2 }, () => Array.from({ length: 2 }, () => Array(2)));
     const transferGroups = Array.from({ length: 2 }, () => Array(2));
 
@@ -605,26 +755,41 @@ async function init() {
                     { binding: 3, resource: velUPrevTex.createView() },
                     { binding: 4, resource: velVPrevTex.createView() },
                     { binding: 5, resource: materialTex[mi].createView() },
-                    { binding: 6, resource: { buffer: particlePosBuffer } },
-                    { binding: 7, resource: { buffer: particleVelBuffer } },
-                    { binding: 8, resource: { buffer: particleMassBuffer } },
+                    { binding: 6, resource: densityTex.createView() },
+                    { binding: 7, resource: { buffer: particlePosBuffer } },
+                    { binding: 8, resource: { buffer: particleVelBuffer } },
+                    { binding: 9, resource: { buffer: particleMassBuffer } },
                 ],
             });
 
-                sandGroups[mi][vi] = device.createBindGroup({
-                    layout: sandStepPipeline.getBindGroupLayout(0),
+            sandGroups[mi][vi] = device.createBindGroup({
+                layout: sandStepPipeline.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: paramsBuffer } },
+                    { binding: 1, resource: materialTex[mi].createView() },
+                    { binding: 2, resource: materialTex[1 - mi].createView() },
+                    { binding: 3, resource: densityTex.createView() },
+                    { binding: 4, resource: velUTex[vi].createView() },
+                    { binding: 5, resource: sandMetaTex[mi].createView() },
+                    { binding: 6, resource: sandMetaTex[1 - mi].createView() },
+                    { binding: 7, resource: solidVelXTex[1 - mi].createView() },
+                    { binding: 8, resource: solidVelYTex[1 - mi].createView() },
+                ],
+            });
+
+            for (let wi = 0; wi < 2; wi++) {
+                extrapolateGroups[mi][vi][wi] = device.createBindGroup({
+                    layout: extrapolatePipeline.getBindGroupLayout(0),
                     entries: [
-                        { binding: 0, resource: { buffer: paramsBuffer } },
-                        { binding: 1, resource: materialTex[mi].createView() },
-                        { binding: 2, resource: materialTex[1 - mi].createView() },
-                        { binding: 3, resource: densityTex.createView() },
-                        { binding: 4, resource: velUTex[vi].createView() },
-                        { binding: 5, resource: sandMetaTex[mi].createView() },
-                        { binding: 6, resource: sandMetaTex[1 - mi].createView() },
-                        { binding: 7, resource: solidVelXTex[1 - mi].createView() },
-                        { binding: 8, resource: solidVelYTex[1 - mi].createView() },
+                        { binding: 0, resource: velUTex[vi].createView() },
+                        { binding: 1, resource: velVTex[vi].createView() },
+                        { binding: 2, resource: velUTex[wi].createView() },
+                        { binding: 3, resource: velVTex[wi].createView() },
+                        { binding: 4, resource: { buffer: markerBuffer } },
+                        { binding: 5, resource: { buffer: simSettingsBuffer } },
                     ],
                 });
+            }
 
             for (let pi = 0; pi < 2; pi++) {
                 pressureGroups[mi][vi][pi] = device.createBindGroup({
@@ -636,7 +801,7 @@ async function init() {
                         { binding: 3, resource: velVTex[vi].createView() },
                         { binding: 4, resource: pressureTex[pi].createView() },
                         { binding: 5, resource: pressureTex[1 - pi].createView() },
-                        { binding: 6, resource: { buffer: cellCountsBuffer } },
+                        { binding: 6, resource: { buffer: markerBuffer } },
                         { binding: 7, resource: { buffer: simSettingsBuffer } },
                         { binding: 8, resource: solidVelXTex[mi].createView() },
                         { binding: 9, resource: solidVelYTex[mi].createView() },
@@ -668,6 +833,7 @@ async function init() {
                         { binding: 7, resource: { buffer: cellCountsBuffer } },
                         { binding: 8, resource: { buffer: simSettingsBuffer } },
                         { binding: 9, resource: sandMetaTex[mi].createView() },
+                        { binding: 10, resource: { buffer: ballBuffer } },
                     ],
                 });
             }
@@ -727,19 +893,41 @@ async function init() {
         ],
     });
 
-    const paramsData = new ArrayBuffer(32);
+    const paramsData = new ArrayBuffer(64);
     const paramsView = new DataView(paramsData);
+    const ballData = new ArrayBuffer(32);
+    const ballView = new DataView(ballData);
 
     function updateParams() {
         paramsView.setFloat32(0, SIM.DT, true);
         paramsView.setFloat32(4, state.gravity, true);
         paramsView.setFloat32(8, state.viscosityScale, true);
-        paramsView.setFloat32(12, SIM.FLIP_RATIO, true);
+        paramsView.setFloat32(12, state.flipRatio, true);
         paramsView.setFloat32(16, state.velocityDamping, true);
-        paramsView.setFloat32(20, state.fluidity / 100, true);
-        paramsView.setFloat32(24, SIM.SOLID_DAMPING, true);
-        paramsView.setUint32(28, state.frame, true);
+        paramsView.setFloat32(20, state.gridDamping, true);
+        paramsView.setFloat32(24, state.fluidity / 100, true);
+        paramsView.setFloat32(28, SIM.SOLID_DAMPING, true);
+        paramsView.setFloat32(32, state.separationStrength, true);
+        paramsView.setFloat32(36, state.vorticityStrength, true);
+        paramsView.setUint32(40, state.frame, true);
+        paramsView.setUint32(44, 0, true);
+        paramsView.setUint32(48, 0, true);
+        paramsView.setUint32(52, 0, true);
+        paramsView.setUint32(56, 0, true);
+        paramsView.setUint32(60, 0, true);
         device.queue.writeBuffer(paramsBuffer, 0, paramsData);
+    }
+
+    function updateBallBuffer() {
+        ballView.setFloat32(0, ballState.pos.x, true);
+        ballView.setFloat32(4, ballState.pos.y, true);
+        ballView.setFloat32(8, state.ballRadius, true);
+        ballView.setUint32(12, state.ballEnabled ? 1 : 0, true);
+        ballView.setFloat32(16, ballState.vel.x, true);
+        ballView.setFloat32(20, ballState.vel.y, true);
+        ballView.setFloat32(24, 0, true);
+        ballView.setFloat32(28, 0, true);
+        device.queue.writeBuffer(ballBuffer, 0, ballData);
     }
 
     function updateDisplayMode() {
@@ -764,12 +952,64 @@ async function init() {
 
     updateStatsUnavailable();
 
+    function resetBallInteraction() {
+        ballState.dragging = false;
+        ballState.vel = { x: 0, y: 0 };
+        ballState.lastTime = 0;
+    }
+
+    function updateMaterialButtons() {
+        document.querySelectorAll('.material-btn').forEach(btn => {
+            if (btn.dataset.material) {
+                const selected = !state.ballEnabled && btn.dataset.material === state.selectedMaterialName;
+                btn.classList.toggle('selected', selected);
+                return;
+            }
+            if (btn.dataset.tool === 'ball') {
+                btn.classList.toggle('selected', state.ballEnabled);
+            }
+        });
+    }
+
     function setSelectedMaterial(name) {
         const value = MATERIAL_BY_NAME[name] ?? MATERIAL.WATER;
         state.selectedMaterial = value;
-        document.querySelectorAll('.material-btn').forEach(btn => {
-            btn.classList.toggle('selected', btn.dataset.material === name);
+        state.selectedMaterialName = name;
+        if (state.ballEnabled) {
+            state.ballEnabled = false;
+            resetBallInteraction();
+            updateBallBuffer();
+        }
+        updateMaterialButtons();
+    }
+
+    function toggleBallTool() {
+        state.ballEnabled = !state.ballEnabled;
+        if (!state.ballEnabled) {
+            resetBallInteraction();
+        }
+        updateBallBuffer();
+        updateMaterialButtons();
+    }
+
+    const DISPLAY_MODES = {
+        none: 0,
+        pressure: 1,
+        velocity: 2,
+        marching: 3,
+    };
+
+    function updateDisplayButtons() {
+        document.querySelectorAll('.option-btn').forEach(btn => {
+            const mode = DISPLAY_MODES[btn.dataset.display] ?? 0;
+            btn.classList.toggle('selected', mode === state.displayMode);
         });
+    }
+
+    function setDisplayModeFromName(name) {
+        state.displayMode = DISPLAY_MODES[name] ?? 0;
+        updateDisplayMode();
+        updateDisplayButtons();
     }
 
     function applyBrush(x, y) {
@@ -795,9 +1035,46 @@ async function init() {
         return { x, y };
     }
 
+    function getPosFromEvent(e) {
+        const rect = canvas.getBoundingClientRect();
+        const x = ((e.clientX - rect.left) / rect.width) * WIDTH;
+        const y = ((e.clientY - rect.top) / rect.height) * HEIGHT;
+        return { x, y };
+    }
+
+    function updateBallFromEvent(e) {
+        const pos = getPosFromEvent(e);
+        const now = performance.now();
+        if (ballState.lastTime > 0) {
+            const dt = (now - ballState.lastTime) / 1000;
+            if (dt > 0) {
+                ballState.vel = {
+                    x: (pos.x - ballState.lastPos.x) / dt,
+                    y: (pos.y - ballState.lastPos.y) / dt,
+                };
+            }
+        } else {
+            ballState.vel = { x: 0, y: 0 };
+        }
+        ballState.pos = pos;
+        ballState.lastPos = pos;
+        ballState.lastTime = now;
+        updateBallBuffer();
+    }
+
     document.querySelectorAll('.material-btn').forEach(btn => {
         btn.addEventListener('click', () => {
-            setSelectedMaterial(btn.dataset.material);
+            if (btn.dataset.material) {
+                setSelectedMaterial(btn.dataset.material);
+            } else if (btn.dataset.tool === 'ball') {
+                toggleBallTool();
+            }
+        });
+    });
+
+    document.querySelectorAll('.option-btn').forEach(btn => {
+        btn.addEventListener('click', () => {
+            setDisplayModeFromName(btn.dataset.display);
         });
     });
 
@@ -809,7 +1086,21 @@ async function init() {
     document.getElementById('viscosityValue').textContent = state.viscosityScale.toFixed(1);
     document.getElementById('damping').value = state.velocityDamping;
     document.getElementById('dampingValue').textContent = state.velocityDamping.toFixed(2);
+    document.getElementById('gridDamping').value = state.gridDamping;
+    document.getElementById('gridDampingValue').textContent = state.gridDamping.toFixed(2);
+    document.getElementById('flipRatio').value = state.flipRatio;
+    document.getElementById('flipValue').textContent = state.flipRatio.toFixed(2);
+    document.getElementById('vorticity').value = state.vorticityStrength;
+    document.getElementById('vorticityValue').textContent = state.vorticityStrength.toFixed(2);
+    document.getElementById('separationStrength').value = state.separationStrength;
+    document.getElementById('separationStrengthValue').textContent = state.separationStrength.toFixed(2);
+    document.getElementById('separationIters').value = state.separationIters;
+    document.getElementById('separationItersValue').textContent = state.separationIters;
+    document.getElementById('ballRadius').value = state.ballRadius;
+    document.getElementById('ballRadiusValue').textContent = state.ballRadius;
     document.getElementById('airMixing').checked = state.airMixing;
+    updateMaterialButtons();
+    updateDisplayButtons();
 
     document.getElementById('brushSize').addEventListener('input', (e) => {
         state.brushSize = parseInt(e.target.value, 10);
@@ -839,36 +1130,42 @@ async function init() {
         document.getElementById('dampingValue').textContent = state.velocityDamping.toFixed(2);
     });
 
+    document.getElementById('gridDamping').addEventListener('input', (e) => {
+        state.gridDamping = parseFloat(e.target.value);
+        document.getElementById('gridDampingValue').textContent = state.gridDamping.toFixed(2);
+    });
+
+    document.getElementById('flipRatio').addEventListener('input', (e) => {
+        state.flipRatio = parseFloat(e.target.value);
+        document.getElementById('flipValue').textContent = state.flipRatio.toFixed(2);
+    });
+
+    document.getElementById('vorticity').addEventListener('input', (e) => {
+        state.vorticityStrength = parseFloat(e.target.value);
+        document.getElementById('vorticityValue').textContent = state.vorticityStrength.toFixed(2);
+    });
+
+    document.getElementById('separationStrength').addEventListener('input', (e) => {
+        state.separationStrength = parseFloat(e.target.value);
+        document.getElementById('separationStrengthValue').textContent = state.separationStrength.toFixed(2);
+    });
+
+    document.getElementById('separationIters').addEventListener('input', (e) => {
+        state.separationIters = parseInt(e.target.value, 10);
+        document.getElementById('separationItersValue').textContent = state.separationIters;
+    });
+
+    document.getElementById('ballRadius').addEventListener('input', (e) => {
+        state.ballRadius = parseFloat(e.target.value);
+        document.getElementById('ballRadiusValue').textContent = state.ballRadius.toFixed(0);
+    });
+
     document.getElementById('fluidity').addEventListener('input', (e) => {
         state.fluidity = parseInt(e.target.value, 10);
         document.getElementById('fluidityValue').textContent = state.fluidity;
     });
 
-    document.getElementById('showPressure').addEventListener('change', () => {
-        const showPressure = document.getElementById('showPressure').checked;
-        const showVelocity = document.getElementById('showVelocity').checked;
-        if (showVelocity) {
-            state.displayMode = 2;
-        } else if (showPressure) {
-            state.displayMode = 1;
-        } else {
-            state.displayMode = 0;
-        }
-        updateDisplayMode();
-    });
-
-    document.getElementById('showVelocity').addEventListener('change', () => {
-        const showPressure = document.getElementById('showPressure').checked;
-        const showVelocity = document.getElementById('showVelocity').checked;
-        if (showVelocity) {
-            state.displayMode = 2;
-        } else if (showPressure) {
-            state.displayMode = 1;
-        } else {
-            state.displayMode = 0;
-        }
-        updateDisplayMode();
-    });
+    setDisplayModeFromName('none');
 
     document.getElementById('airMixing').addEventListener('change', (e) => {
         state.airMixing = e.target.checked;
@@ -884,20 +1181,43 @@ async function init() {
         clearSimulation(false);
     });
 
-    canvas.addEventListener('mousedown', (e) => {
+    function endPointerInteraction() {
+        state.isDrawing = false;
+        resetBallInteraction();
+        updateBallBuffer();
+    }
+
+    canvas.addEventListener('pointerdown', (e) => {
+        canvas.setPointerCapture(e.pointerId);
+        if (state.ballEnabled) {
+            ballState.dragging = true;
+            updateBallFromEvent(e);
+            return;
+        }
         state.isDrawing = true;
         const pos = getCellFromEvent(e);
         applyBrush(pos.x, pos.y);
     });
 
-    canvas.addEventListener('mousemove', (e) => {
+    canvas.addEventListener('pointermove', (e) => {
+        if (state.ballEnabled) {
+            if (ballState.dragging) {
+                updateBallFromEvent(e);
+            }
+            return;
+        }
         if (!state.isDrawing) return;
         const pos = getCellFromEvent(e);
         applyBrush(pos.x, pos.y);
     });
 
-    canvas.addEventListener('mouseup', () => { state.isDrawing = false; });
-    canvas.addEventListener('mouseleave', () => { state.isDrawing = false; });
+    canvas.addEventListener('pointerup', (e) => {
+        if (canvas.hasPointerCapture(e.pointerId)) {
+            canvas.releasePointerCapture(e.pointerId);
+        }
+        endPointerInteraction();
+    });
+    canvas.addEventListener('pointercancel', endPointerInteraction);
 
     document.addEventListener('keydown', (e) => {
         if (e.key === ' ') {
@@ -935,7 +1255,8 @@ async function init() {
     const clearCount = Math.max(WIDTH * HEIGHT, velUWidth * HEIGHT, WIDTH * velVHeight);
     const clearWorkgroups = Math.ceil(clearCount / 256);
     const cellCountWorkgroups = Math.ceil((WIDTH * HEIGHT) / 256);
-    const separationIters = Math.max(0, SIM.SEPARATION_ITERS | 0);
+    const extrapolationIters = Math.max(0, SIM.EXTRAPOLATION_ITERS | 0);
+    const reseedIters = Math.max(0, SIM.RESEED_ITERS | 0);
 
     function frame() {
         const now = performance.now();
@@ -946,6 +1267,10 @@ async function init() {
             state.lastFpsTime = now;
         }
 
+        if (ballState.dragging && now - ballState.lastTime > 100) {
+            ballState.vel = { x: 0, y: 0 };
+        }
+
         device.queue.writeTexture(
             { texture: spawnTex },
             spawnData,
@@ -953,6 +1278,7 @@ async function init() {
             { width: WIDTH, height: HEIGHT }
         );
         spawnData.fill(0);
+        updateBallBuffer();
 
         const encoder = device.createCommandEncoder();
         const steps = Math.max(1, state.simSpeed | 0);
@@ -996,6 +1322,7 @@ async function init() {
                 for (let step = 0; step < steps; step++) {
                     state.frame++;
                     updateParams();
+                    const separationIters = Math.max(0, state.separationIters | 0);
 
                     pass.setPipeline(integratePipeline);
                     pass.setBindGroup(0, integrateGroups[matIndex]);
@@ -1035,6 +1362,34 @@ async function init() {
                     pass.setBindGroup(0, normalizeGroup);
                     pass.dispatchWorkgroups(velWorkgroupsX, velWorkgroupsY);
 
+                    pass.setPipeline(buildMarkerPipeline);
+                    pass.setBindGroup(0, markerGroups[matIndex]);
+                    pass.dispatchWorkgroups(cellWorkgroupsX, cellWorkgroupsY);
+
+                    for (let iter = 0; iter < reseedIters; iter++) {
+                        pass.setPipeline(reseedPipeline);
+                        pass.setBindGroup(0, reseedGroup);
+                        pass.dispatchWorkgroups(cellWorkgroupsX, cellWorkgroupsY);
+                    }
+
+                    if (reseedIters > 0) {
+                        pass.setPipeline(clearGridPipeline);
+                        pass.setBindGroup(0, clearGridGroup);
+                        pass.dispatchWorkgroups(clearWorkgroups);
+
+                        pass.setPipeline(depositPipeline);
+                        pass.setBindGroup(0, depositGroup);
+                        pass.dispatchWorkgroups(particleWorkgroups);
+
+                        pass.setPipeline(normalizePipeline);
+                        pass.setBindGroup(0, normalizeGroup);
+                        pass.dispatchWorkgroups(velWorkgroupsX, velWorkgroupsY);
+
+                        pass.setPipeline(buildMarkerPipeline);
+                        pass.setBindGroup(0, markerGroups[matIndex]);
+                        pass.dispatchWorkgroups(cellWorkgroupsX, cellWorkgroupsY);
+                    }
+
                     velIndex = 0;
                     pass.setPipeline(maskSolidVelPipeline);
                     pass.setBindGroup(0, maskVelGroups[matIndex][velIndex]);
@@ -1056,6 +1411,52 @@ async function init() {
                     pass.setPipeline(maskSolidVelPipeline);
                     pass.setBindGroup(0, maskVelGroups[matIndex][velIndex]);
                     pass.dispatchWorkgroups(velWorkgroupsX, velWorkgroupsY);
+
+                    if (extrapolationIters > 0) {
+                        let readIndex = velIndex;
+                        let writeIndex = 1 - readIndex;
+                        for (let iter = 0; iter < extrapolationIters; iter++) {
+                            pass.setPipeline(extrapolatePipeline);
+                            pass.setBindGroup(0, extrapolateGroups[matIndex][readIndex][writeIndex]);
+                            pass.dispatchWorkgroups(velWorkgroupsX, velWorkgroupsY);
+                            const tmp = readIndex;
+                            readIndex = writeIndex;
+                            writeIndex = tmp;
+                        }
+                        velIndex = readIndex;
+
+                        pass.setPipeline(maskSolidVelPipeline);
+                        pass.setBindGroup(0, maskVelGroups[matIndex][velIndex]);
+                        pass.dispatchWorkgroups(velWorkgroupsX, velWorkgroupsY);
+                    }
+
+                    pass.setPipeline(dampVelocityPipeline);
+                    pass.setBindGroup(0, dampVelGroups[velIndex]);
+                    pass.dispatchWorkgroups(velWorkgroupsX, velWorkgroupsY);
+
+                    if (state.vorticityStrength > 0.0) {
+                        pass.setPipeline(vorticityPipeline);
+                        pass.setBindGroup(0, vorticityGroups[velIndex]);
+                        pass.dispatchWorkgroups(cellWorkgroupsX, cellWorkgroupsY);
+
+                        pass.setPipeline(applyVorticityPipeline);
+                        pass.setBindGroup(0, applyVorticityGroups[velIndex]);
+                        pass.dispatchWorkgroups(velWorkgroupsX, velWorkgroupsY);
+
+                        pass.setPipeline(maskSolidVelPipeline);
+                        pass.setBindGroup(0, maskVelGroups[matIndex][velIndex]);
+                        pass.dispatchWorkgroups(velWorkgroupsX, velWorkgroupsY);
+                    }
+
+                    if (state.ballEnabled) {
+                        pass.setPipeline(ballForcePipeline);
+                        pass.setBindGroup(0, ballForceGroups[velIndex]);
+                        pass.dispatchWorkgroups(velWorkgroupsX, velWorkgroupsY);
+
+                        pass.setPipeline(maskSolidVelPipeline);
+                        pass.setBindGroup(0, maskVelGroups[matIndex][velIndex]);
+                        pass.dispatchWorkgroups(velWorkgroupsX, velWorkgroupsY);
+                    }
 
                     pass.setPipeline(transferPipeline);
                     pass.setBindGroup(0, transferGroups[matIndex][velIndex]);

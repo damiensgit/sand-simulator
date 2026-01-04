@@ -143,18 +143,26 @@ export const SIM = {
     DT: 1/60,                  // Time step
     PARTICLES_PER_CELL: 9,
     PARTICLES_PER_CELL_SIDE: 3,
-    FLIP_RATIO: 0.9,
-    VELOCITY_DAMPING: 0.4,
+    FLIP_RATIO: 0.95,
+    VELOCITY_DAMPING: 0.05,    // Particle damping (PIC/FLIP blend)
+    GRID_DAMPING: 0.05,        // Grid velocity damping
+    SURFACE_FLIP_RATIO: 0.8,
+    MAX_VELOCITY: 20.0,
     SOLID_DAMPING: 0.35,
     AIR_MIXING: false,
     RENDER_THRESHOLD: 0.5,
     INTERACT_THRESHOLD: 0.05,
+    MARKER_THRESHOLD: 0.1,
     REST_DENSITY: 1.0,
     DRIFT_SCALE: 0.8,
     PARTICLE_RADIUS: 0.15,
     MAX_CELL_PARTICLES: 32,
     SEPARATION_ITERS: 1,
     SEPARATION_STRENGTH: 0.2,
+    VORTICITY_STRENGTH: 1.5,
+    EXTRAPOLATION_ITERS: 2,
+    MARKER_DILATE: 0,
+    RESEED_ITERS: 1,
 
     // Temperature
     AMBIENT_TEMP: 20,
@@ -171,7 +179,7 @@ export const SIM = {
 // =============================================================================
 
 export const DEFAULTS = {
-    simSpeed: 2,
+    simSpeed: 3,
     brushSize: 5,
     selectedMaterial: MATERIAL.WATER,
     isPaused: false,

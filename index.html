@@ -230,10 +230,50 @@
             border-radius: 3px;
             font-family: inherit;
         }
+
+        .new-banner {
+            background: linear-gradient(135deg, #252540, #2a2a50);
+            padding: 10px 20px;
+            border-radius: 8px;
+            margin-bottom: 15px;
+            border: 1px solid #3a3a5a;
+        }
+
+        .new-banner a {
+            color: #6ab0ff;
+            text-decoration: none;
+            font-size: 13px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            transition: color 0.15s;
+        }
+
+        .new-banner a:hover {
+            color: #8ac4ff;
+        }
+
+        .new-badge {
+            background: #4adf7c;
+            color: #111;
+            font-size: 10px;
+            font-weight: 700;
+            padding: 3px 6px;
+            border-radius: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
     </style>
 </head>
 <body>
     <h1>Sand Simulator</h1>
+
+    <div class="new-banner">
+        <a href="flip-sim/">
+            <span class="new-badge">New</span>
+            FLIP Fluid Sim - Realistic water & sand with pressure physics
+        </a>
+    </div>
 
     <canvas id="canvas"></canvas>
 
